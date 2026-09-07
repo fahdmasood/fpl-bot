@@ -970,6 +970,37 @@ def test_no_clean_sheet_probability_is_physically_implausible(client):
     assert worst[0] <= 0.55, f"team {worst[1]} projects a {worst[0]:.0%} clean sheet"
 
 
+def test_defensive_contribution_is_a_probability_not_a_ratio():
+    """A player averaging exactly the threshold clears it about half the time.
+    The bug this replaced credited him ~100% of the award."""
+    from fplbot.projection import poisson_at_least
+    at_threshold = poisson_at_least(12, 12.0)
+    assert 0.3 < at_threshold < 0.6, at_threshold
+    # And the ratio proxy it replaced would have said 1.0.
+    assert at_threshold < 1.0
+
+
+def test_defensive_contribution_probability_rises_with_the_rate():
+    from fplbot.projection import poisson_at_least
+    probs = [poisson_at_least(12, m) for m in (6.0, 9.0, 12.0, 15.0, 18.0)]
+    assert probs == sorted(probs)
+    assert probs[0] < 0.05 and probs[-1] > 0.9
+
+
+def test_a_player_who_cannot_have_cleared_the_threshold_is_not_credited_as_if_he_did(client):
+    """Janelt: 35 defensive actions across 3 matches, threshold 12. He cannot
+    have cleared it more than twice, so he must not be credited near-fully."""
+    from fplbot.projection import poisson_at_least, position_medians, _shrink
+    med = position_medians(client.players())
+    janelt = [p for p in client.players() if p.web_name == "Janelt"]
+    if not janelt:
+        import pytest
+        pytest.skip("Janelt not in this snapshot")
+    p = janelt[0]
+    dc90 = _shrink(p.defensive_contribution_per_90, med["MID"]["dc"], p.minutes / 90)
+    assert poisson_at_least(12, dc90) < 0.6
+
+
 def test_shrinkage_pulls_a_small_sample_toward_the_prior():
     from fplbot.projection import _shrink
     # An extreme rate seen over 3 matches should land nearer the prior than
@@ -1040,9 +1071,11 @@ from fplbot.models import Fixture, Player, PlayerSentiment, Projection, Team
 MINUTES_FLOOR = 270  # three full matches; used for selection share, not rates
 
 # Prior weight in matches when regressing a rate toward its cohort mean.
-# Set to twice the early-season sample: three matches in, the observed rate
-# and the prior carry roughly equal weight.
-SHRINKAGE_K = 6.0
+# Chosen by measurement, not feel: K=2 lets a clean-sheet probability breach
+# the 55% plausibility ceiling; K=6 leaves ~9 points of unused headroom under
+# it while halving the league's defensive spread. K=4 keeps a 5-point margin
+# and preserves noticeably more of the real signal.
+SHRINKAGE_K = 4.0
 
 LEAGUE_DEFAULT_XGC = 1.4  # goals per 90, used only when a club has no data
 
@@ -1080,12 +1113,13 @@ def position_medians(players: list[Player]) -> dict[str, dict[str, float]]:
         pool = [p for p in players
                 if p.position == position and p.minutes >= MINUTES_FLOOR]
         if not pool:
-            out[position] = {"xg": 0.0, "xa": 0.0, "bps": 0.0}
+            out[position] = {"xg": 0.0, "xa": 0.0, "bps": 0.0, "dc": 0.0}
             continue
         out[position] = {
             "xg": statistics.median(p.expected_goals / (p.minutes / 90) for p in pool),
             "xa": statistics.median(p.expected_assists / (p.minutes / 90) for p in pool),
             "bps": statistics.median(p.bps / (p.minutes / 90) for p in pool),
+            "dc": statistics.median(p.defensive_contribution_per_90 for p in pool),
         }
     return out
 
@@ -1145,6 +1179,25 @@ def minutes_probability(
     return max(0.0, min(1.0, base))
 
 
+def poisson_at_least(threshold: int, mean: float) -> float:
+    """P(X >= threshold) for X ~ Poisson(mean).
+
+    Defensive contributions are counts, and the 2 points are awarded per match
+    for clearing a threshold — so what matters is the PROBABILITY of clearing
+    it, not the ratio of the average to it. A player averaging 11.67 actions
+    against a threshold of 12 clears it roughly half the time; treating
+    11.67/12 as a 97% share credits him nearly full points every match.
+    """
+    if mean <= 0:
+        return 0.0
+    term = math.exp(-mean)
+    cumulative = term
+    for k in range(1, threshold):
+        term *= mean / k
+        cumulative += term
+    return max(0.0, min(1.0, 1.0 - cumulative))
+
+
 def clean_sheet_probability(team_xgc90: float, difficulty: int) -> float:
     """Poisson probability of conceding zero, given the club's own xGC.
 
@@ -1196,10 +1249,15 @@ def expected_points_one_gw(
         clean_sheet_probability(team_xgc90, difficulty) * cs_points if cs_points else 0.0
     )
 
-    dc90 = player.defensive_contribution_per_90
     threshold = SCORING["defensive_threshold"][pos]
-    dc = (SCORING["defensive_contribution"][pos] * min(1.0, dc90 / threshold)
-          if threshold < 99 else 0.0)
+    if threshold < 99:
+        # Shrunk like every other rate, then converted to a probability of
+        # clearing the threshold rather than a ratio against it.
+        dc90 = _shrink(player.defensive_contribution_per_90, med["dc"],
+                       player.minutes / 90)
+        dc = SCORING["defensive_contribution"][pos] * poisson_at_least(threshold, dc90)
+    else:
+        dc = 0.0
 
     # The form channel moves attacking output and bonus — the parts of a
     # projection that genuine form talk is about. It does not touch clean
@@ -1273,7 +1331,7 @@ def project_all(
 - [ ] **Step 4: Run tests**
 
 Run: `python3 -m pytest tests/test_projection.py -v`
-Expected: 17 passed
+Expected: 20 passed
 
 - [ ] **Step 5: Commit**
 
