@@ -162,3 +162,38 @@ def test_a_partial_feed_outage_keeps_the_source_and_names_the_failures(monkeypat
     assert "news-rss" in stats["sources_used"]
     assert "news-rss" not in stats["sources_absent"]
     assert stats["feeds_failed"] == ["bbc"]
+
+
+def test_reddit_volume_cannot_evict_the_primary_source():
+    """Reddit comments are minutes old and news articles hours old, so a
+    single newest-first cap over the combined pool lets comment volume push
+    out the source the spec calls primary."""
+    settings = Settings(cache_dir="/tmp/x", comment_cap=600)
+    articles = [item(source="bbc", body=f"article {i}",
+                     published_at=NOW - timedelta(hours=6)) for i in range(20)]
+    comments = [item(source="reddit-comment", body=f"comment {i}",
+                     published_at=NOW - timedelta(minutes=2)) for i in range(600)]
+
+    kept = filter_items(comments + articles, settings, NOW)
+    surviving_news = [i for i in kept if i.source == "bbc"]
+    assert len(surviving_news) == 20, (
+        f"comment volume evicted the news: {len(surviving_news)}/20 left"
+    )
+
+
+def test_each_pool_is_capped_on_its_own():
+    settings = Settings(cache_dir="/tmp/x", comment_cap=5)
+    articles = [item(source="bbc", body=f"article {i}") for i in range(50)]
+    comments = [item(source="reddit-comment", body=f"comment {i}") for i in range(50)]
+    kept = filter_items(comments + articles, settings, NOW)
+    assert len([i for i in kept if i.source == "bbc"]) == 5
+    assert len([i for i in kept if i.source == "reddit-comment"]) == 5
+
+
+def test_a_reddit_copy_of_a_news_item_is_still_deduplicated():
+    """Splitting the pools must not lose cross source deduplication: a
+    comment pasting a headline is not a second piece of evidence."""
+    settings = Settings(cache_dir="/tmp/x")
+    article = item(source="bbc", body="Saka is a doubt for Saturday")
+    quote = item(source="reddit-comment", body="saka is a doubt for saturday!")
+    assert len(filter_items([article, quote], settings, NOW)) == 1

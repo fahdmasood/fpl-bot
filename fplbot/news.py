@@ -49,9 +49,31 @@ def normalise(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", "", text.lower()).strip())
 
 
+def _is_reddit(item: NewsItem) -> bool:
+    return item.source.startswith("reddit")
+
+
 def filter_items(items: list[NewsItem], settings: Settings, now: datetime) -> list[NewsItem]:
+    """Score, age and duplicate filtering, capped per source pool.
+
+    News and Reddit are capped separately. A single newest-first cap over the
+    combined pool hands the whole allowance to Reddit as soon as it is
+    enabled: comments are minutes old and articles hours old, so comment
+    volume evicts the source the spec calls primary.
+
+    Deduplication still runs across both pools, with news filtered first, so
+    a comment pasting a headline is not counted as fresh evidence.
+    """
     cutoff = now - timedelta(hours=settings.max_age_hours)
     seen: set[str] = set()
+    news = [i for i in items if not _is_reddit(i)]
+    reddit = [i for i in items if _is_reddit(i)]
+    return (_filter_pool(news, settings, cutoff, seen)
+            + _filter_pool(reddit, settings, cutoff, seen))
+
+
+def _filter_pool(items: list[NewsItem], settings: Settings, cutoff: datetime,
+                 seen: set[str]) -> list[NewsItem]:
     kept: list[NewsItem] = []
 
     for it in sorted(items, key=lambda i: i.published_at, reverse=True):
