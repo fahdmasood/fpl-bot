@@ -87,13 +87,82 @@ def test_report_totals_are_consistent(client):
 
 def test_transfer_diff_identifies_swaps(client):
     report, players, projections, squad = _report(client)
+    by_id = {p.id: p for p in players}
     current = list(squad.players)
-    replacement = next(p.id for p in players if p.id not in current)
+    target = current[0]
+    replacement = next(p.id for p in players
+                       if p.id not in current
+                       and by_id[p.id].position == by_id[target].position)
     current[0] = replacement
     moves = transfer_diff(current, squad.players, players, projections)
     assert len(moves) == 1
     assert moves[0]["out"]["id"] == replacement
-    assert moves[0]["in"]["id"] == squad.players[0]
+    assert moves[0]["in"]["id"] == target
+
+
+def test_transfers_are_always_like_for_like_by_position(client):
+    """FPL will not let you sell a goalkeeper to buy a midfielder. Pairing the
+    departures and arrivals in incidental list order produced exactly that,
+    and presented it as advice."""
+    report, players, projections, squad = _report(client)
+    by_id = {p.id: p for p in players}
+
+    # Swap out one player of each position, ordering the current squad so the
+    # naive pairing would cross positions.
+    current = list(squad.players)
+    for position in ("FWD", "GKP", "MID", "DEF"):
+        victim = next(i for i in current if by_id[i].position == position)
+        replacement = next(p.id for p in players
+                           if p.id not in current and p.position == position)
+        current[current.index(victim)] = replacement
+    current.reverse()
+
+    moves = transfer_diff(current, squad.players, players, projections)
+    assert moves, "expected some transfers"
+    for m in moves:
+        out_pos = by_id[m["out"]["id"]].position
+        in_pos = by_id[m["in"]["id"]].position
+        assert out_pos == in_pos, f"illegal transfer suggested: {out_pos} for {in_pos}"
+        assert m["position"] == out_pos
+
+
+def test_unaffordable_transfers_are_flagged_not_hidden(client):
+    """Knowing a move is out of reach beats not being told about it."""
+    report, players, projections, squad = _report(client)
+    by_id = {p.id: p for p in players}
+    current = list(squad.players)
+    target = max((i for i in current if by_id[i].position == "MID"),
+                 key=lambda i: by_id[i].now_cost)
+    cheap = min((p for p in players
+                 if p.id not in current and p.position == "MID"),
+                key=lambda p: p.now_cost)
+    current[current.index(target)] = cheap.id
+
+    moves = transfer_diff(current, squad.players, players, projections, bank=0)
+    assert len(moves) == 1
+    # Buying back a dearer player with nothing in the bank is not affordable.
+    if moves[0]["cost_change"] > 0:
+        assert moves[0]["affordable"] is False
+
+
+def test_html_shows_reasoning_and_transfers(client):
+    """The spec requires the rendered page to carry the reasoning, not just
+    the names and numbers."""
+    report, players, projections, squad = _report(client)
+    by_id = {p.id: p for p in players}
+    current = list(squad.players)
+    target = current[0]
+    replacement = next(p.id for p in players
+                       if p.id not in current
+                       and by_id[p.id].position == by_id[target].position)
+    current[0] = replacement
+    report["transfers"] = transfer_diff(current, squad.players, players, projections)
+    report["transfers_note"] = "test"
+
+    html_out = render_html(report)
+    assert "Suggested transfers" in html_out
+    assert report["squad"][0]["explanation"][:20] in html_out
+    assert "Sources used" in html_out
 
 
 def test_identical_squads_produce_no_transfers(client):

@@ -32,22 +32,59 @@ def _player_row(player: Player, projection: Projection,
     }
 
 
-def transfer_diff(current_ids, target_ids, players, projections) -> list[dict]:
-    by_id = {p.id: p for p in players}
-    out_ids = [i for i in current_ids if i not in set(target_ids)]
-    in_ids = [i for i in target_ids if i not in set(current_ids)]
+def transfer_diff(current_ids, target_ids, players, projections,
+                  bank: int = 0) -> list[dict]:
+    """Pair departures with arrivals, within position, cheapest funding first.
 
-    moves = []
-    for out_id, in_id in zip(out_ids, in_ids):
-        moves.append({
-            "out": {"id": out_id, "name": by_id[out_id].web_name,
-                    "projected_points": round(projections[out_id].total, 2)},
-            "in": {"id": in_id, "name": by_id[in_id].web_name,
-                   "projected_points": round(projections[in_id].total, 2)},
-            "gain": round(projections[in_id].total - projections[out_id].total, 2),
-            "cost_change": by_id[in_id].now_cost - by_id[out_id].now_cost,
-        })
-    return sorted(moves, key=lambda m: m["gain"], reverse=True)
+    FPL transfers are like for like: a goalkeeper sold funds a goalkeeper
+    bought. Pairing the two lists in incidental order can suggest selling a
+    keeper to buy a midfielder, which the game will simply reject, and makes
+    the reported points gain meaningless because it compares two different
+    scoring scales.
+
+    `bank` is the money available on top of the sales. It defaults to zero,
+    which means every move must fund itself, because the bot does not know
+    the real bank balance of a squad it did not build.
+    """
+    by_id = {p.id: p for p in players}
+    target = set(target_ids)
+    current = set(current_ids)
+    out_ids = [i for i in current_ids if i not in target]
+    in_ids = [i for i in target_ids if i not in current]
+
+    moves: list[dict] = []
+    for position in ("GKP", "DEF", "MID", "FWD"):
+        # Sell the weakest, buy the strongest, so each pairing is the best
+        # available swap for that position rather than an arbitrary one.
+        going = sorted((i for i in out_ids if by_id[i].position == position),
+                       key=lambda i: projections[i].total)
+        coming = sorted((i for i in in_ids if by_id[i].position == position),
+                        key=lambda i: projections[i].total, reverse=True)
+        for out_id, in_id in zip(going, coming):
+            moves.append({
+                "position": position,
+                "out": {"id": out_id, "name": by_id[out_id].web_name,
+                        "price_m": by_id[out_id].price_m,
+                        "projected_points": round(projections[out_id].total, 2)},
+                "in": {"id": in_id, "name": by_id[in_id].web_name,
+                       "price_m": by_id[in_id].price_m,
+                       "projected_points": round(projections[in_id].total, 2)},
+                "gain": round(projections[in_id].total - projections[out_id].total, 2),
+                "cost_change": by_id[in_id].now_cost - by_id[out_id].now_cost,
+            })
+
+    # Take the best gains first and mark where the money runs out, rather
+    # than hiding the unaffordable ones. Knowing a move is out of reach is
+    # more useful than not being told about it.
+    ordered = sorted(moves, key=lambda m: m["gain"], reverse=True)
+    spent = 0
+    for move in ordered:
+        if spent + move["cost_change"] <= bank:
+            move["affordable"] = True
+            spent += move["cost_change"]
+        else:
+            move["affordable"] = False
+    return ordered
 
 
 def _degradation_notes(stats: dict) -> list[str]:
@@ -118,6 +155,11 @@ def build_report(squad: Squad, players, projections, sentiment, stats,
             transfer_diff(current_squad, squad.players, players, projections)
             if current_squad else []
         ),
+        "transfers_note": (
+            "Moves are paired within position and assume no money in the bank, "
+            "since the bot does not know your actual balance."
+            if current_squad else ""
+        ),
     }
 
 
@@ -129,10 +171,56 @@ def render_html(report: dict) -> str:
         f'<p class="warn">Reduced coverage: {esc(report["degraded_reason"])}</p>'
         if report["degraded"] else ""
     )
-    rows = "".join(
-        f"<tr><td>{esc(p['position'])}</td><td>{esc(p['name'])}</td>"
-        f"<td>£{esc(p['price_m'])}m</td><td>{esc(p['projected_points'])}</td></tr>"
-        for p in report["squad"]
+    starting = set(report["starting_xi"])
+
+    def _row(p: dict) -> str:
+        marks = []
+        if p["id"] in starting:
+            marks.append("XI")
+        if p["id"] == report["captain"]["id"]:
+            marks.append("C")
+        evidence = ""
+        if p.get("sentiment") and p["sentiment"]["evidence"]:
+            quotes = "".join(
+                f"<li>{esc(q)}</li>" for q in p["sentiment"]["evidence"])
+            evidence = (
+                f"<details><summary>sentiment "
+                f"{p['sentiment']['availability_signal']:+.2f} availability, "
+                f"{p['sentiment']['form_signal']:+.2f} form, "
+                f"{p['sentiment']['volume']} mentions</summary>"
+                f"<ul>{quotes}</ul></details>"
+            )
+        return (
+            f"<tr><td>{esc(' '.join(marks))}</td><td>{esc(p['position'])}</td>"
+            f"<td>{esc(p['name'])}</td><td>£{esc(p['price_m'])}m</td>"
+            f"<td>{esc(p['projected_points'])}</td>"
+            f"<td class='why'>{esc(p['explanation'])}{evidence}</td></tr>"
+        )
+
+    rows = "".join(_row(p) for p in report["squad"])
+
+    transfers = ""
+    if report.get("transfers"):
+        moves = "".join(
+            f"<tr><td>{esc(m['position'])}</td>"
+            f"<td>{esc(m['out']['name'])} (£{esc(m['out']['price_m'])}m, "
+            f"{esc(m['out']['projected_points'])})</td>"
+            f"<td>{esc(m['in']['name'])} (£{esc(m['in']['price_m'])}m, "
+            f"{esc(m['in']['projected_points'])})</td>"
+            f"<td>{esc(m['gain'])}</td>"
+            f"<td>{'yes' if m.get('affordable') else 'no'}</td></tr>"
+            for m in report["transfers"]
+        )
+        transfers = (
+            "<h2>Suggested transfers</h2>"
+            f"<p>{esc(report.get('transfers_note', ''))}</p>"
+            "<table><tr><th>Pos</th><th>Out</th><th>In</th><th>Gain</th>"
+            f"<th>Affordable</th></tr>{moves}</table>"
+        )
+
+    coverage = (
+        f"<p class='meta'>Sources used: {esc(', '.join(report['sources_used']) or 'none')}. "
+        f"Absent: {esc(', '.join(report['sources_absent']) or 'none')}.</p>"
     )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -141,12 +229,19 @@ def render_html(report: dict) -> str:
 body {{ font: 15px system-ui, sans-serif; margin: 2rem auto; max-width: 46rem; }}
 .warn {{ background: #fde68a; padding: .75rem; border-radius: .375rem; }}
 table {{ border-collapse: collapse; width: 100%; }}
-td, th {{ border-bottom: 1px solid #e5e7eb; padding: .4rem .6rem; text-align: left; }}
+td, th {{ border-bottom: 1px solid #e5e7eb; padding: .4rem .6rem; text-align: left;
+          vertical-align: top; }}
+.why {{ font-size: .85em; color: #4b5563; max-width: 26rem; }}
+.meta {{ font-size: .85em; color: #6b7280; }}
+details summary {{ cursor: pointer; }}
 </style></head><body>
 <h1>{esc(report['gameweek']['name'])}</h1>
 <p>Deadline {esc(report['gameweek']['deadline'])} ·
    Projected XI total {esc(report['projected_total'])} pts ·
    Captain {esc(report['captain']['name'])}</p>
 {banner}
-<table><tr><th>Pos</th><th>Player</th><th>Price</th><th>xP</th></tr>{rows}</table>
+{coverage}
+<table><tr><th></th><th>Pos</th><th>Player</th><th>Price</th><th>xP</th>
+<th>Why</th></tr>{rows}</table>
+{transfers}
 </body></html>"""
