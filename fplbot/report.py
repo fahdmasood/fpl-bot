@@ -50,21 +50,50 @@ def transfer_diff(current_ids, target_ids, players, projections) -> list[dict]:
     return sorted(moves, key=lambda m: m["gain"], reverse=True)
 
 
+def _degradation_notes(stats: dict) -> list[str]:
+    """Reasons this run is worth less than a normal one.
+
+    Reads the stats dict that news.collect() actually returns. An absent
+    Reddit is NOT degradation: Reddit requires approved Data API access and
+    running without it is the expected default. A Reddit that is configured
+    and then fails IS worth reporting, because something broke rather than
+    was never set up.
+    """
+    notes: list[str] = []
+    absent = stats.get("sources_absent", [])
+
+    if "news-rss" in absent:
+        notes.append(
+            "The news feeds could not be read this run, so the squad was "
+            "built from statistics alone with no sentiment applied."
+        )
+    elif stats.get("items_after_filter", 0) == 0:
+        notes.append(
+            "No news items survived filtering, so no sentiment was applied "
+            "this run."
+        )
+
+    status = stats.get("reddit_status", "not_configured")
+    if isinstance(status, str) and status.startswith("failed:"):
+        notes.append(
+            f"Reddit is configured but failed this run ({status}), so "
+            "comment level signal is missing."
+        )
+
+    age = stats.get("cache_age_seconds") or 0
+    if age > 6 * 3600:
+        notes.append(
+            f"FPL data was served from a cache {age / 3600:.1f} hours old."
+        )
+
+    return notes
+
+
 def build_report(squad: Squad, players, projections, sentiment, stats,
                  gameweek: Gameweek, current_squad=None) -> dict:
     by_id = {p.id: p for p in players}
 
-    reasons = []
-    if stats.get("degraded"):
-        reasons.append(
-            "No comment-level Reddit access this run; sentiment came from "
-            "post titles only and is materially weaker."
-        )
-    if stats.get("cache_age_seconds", 0) > 6 * 3600:
-        reasons.append(
-            f"FPL data served from a cache "
-            f"{stats['cache_age_seconds'] / 3600:.1f}h old."
-        )
+    reasons = _degradation_notes(stats)
 
     return {
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
@@ -73,6 +102,8 @@ def build_report(squad: Squad, players, projections, sentiment, stats,
         "degraded": bool(reasons),
         "degraded_reason": " ".join(reasons),
         "stats": stats,
+        "sources_used": stats.get("sources_used", []),
+        "sources_absent": stats.get("sources_absent", []),
         "total_cost": sum(by_id[i].now_cost for i in squad.players),
         "bank": squad.bank,
         "projected_total": round(
