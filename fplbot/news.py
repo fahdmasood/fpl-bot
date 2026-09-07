@@ -97,8 +97,10 @@ def _filter_pool(items: list[NewsItem], settings: Settings, cutoff: datetime,
 
 
 class RssCollector:
-    def __init__(self, feeds=FEEDS, default_score: int = 5):
-        self.feeds = feeds
+    def __init__(self, feeds=None, default_score: int = 5):
+        # Resolved here rather than bound as a default at import time, so
+        # patching news.FEEDS is not a no-op.
+        self.feeds = FEEDS if feeds is None else feeds
         self.default_score = default_score
 
     def collect(self) -> tuple[list[NewsItem], set[str]]:

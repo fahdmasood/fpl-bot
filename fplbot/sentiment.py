@@ -276,6 +276,14 @@ def aggregate(
         score = scores.get(index)
         if score is None:
             continue
+        # The scorer is given the player_id and echoes it back. If it comes
+        # back different, the index and the mention have desynchronised, and
+        # applying the score would attribute a claim to the wrong player.
+        if score.player_id != mention.player_id:
+            log.debug("score at index %d claims player %s but the mention is "
+                      "about player %s; skipping",
+                      index, score.player_id, mention.player_id)
+            continue
 
         age_days = (now - mention.item.published_at).total_seconds() / 86400
         # Trust tier discounts sources that speculate; see news.SOURCE_TRUST.

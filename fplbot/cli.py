@@ -92,7 +92,9 @@ def main(argv=None) -> int:
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
     settings = Settings.from_env()
-    if args.horizon:
+    # `is not None`, not truthiness: --horizon 0 is a real request, and
+    # silently ignoring it is worse than projecting nothing.
+    if args.horizon is not None:
         settings.horizon = args.horizon
 
     if args.batch:

@@ -214,7 +214,9 @@ def build_report(squad: Squad, players, projections, sentiment, stats,
         "sources_used": stats.get("sources_used", []),
         "sources_absent": stats.get("sources_absent", []),
         "total_cost": sum(by_id[i].now_cost for i in squad.players),
-        "bank": squad.bank,
+        # The optimiser's leftover budget, not the manager's bank. Sitting
+        # unqualified next to a note about the user's money, it read as one.
+        "optimiser_bank": squad.bank,
         "projected_total": round(
             sum(projections[i].total for i in squad.starting_xi), 2),
         "captain": _player_row(by_id[squad.captain_id],

@@ -197,3 +197,13 @@ def test_a_reddit_copy_of_a_news_item_is_still_deduplicated():
     article = item(source="bbc", body="Saka is a doubt for Saturday")
     quote = item(source="reddit-comment", body="saka is a doubt for saturday!")
     assert len(filter_items([article, quote], settings, NOW)) == 1
+
+
+def test_the_feed_list_is_resolved_at_construction_not_at_import(monkeypatch):
+    """Binding FEEDS as a default argument froze it at import, so patching
+    news.FEEDS was a silent no-op and any test that tried it ran the real
+    feed list against the network."""
+    import fplbot.news as news
+
+    monkeypatch.setattr(news, "FEEDS", [("fake", "https://example.invalid/rss")])
+    assert news.RssCollector().feeds == [("fake", "https://example.invalid/rss")]

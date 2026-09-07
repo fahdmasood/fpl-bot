@@ -166,3 +166,19 @@ def test_cli_writes_json_and_html(client, tmp_path, monkeypatch):
     assert cli.main(["--output", str(out)]) == 0
     assert (tmp_path / "report.json").exists()
     assert (tmp_path / "report.html").exists()
+
+
+def test_horizon_zero_is_honoured_not_silently_ignored(client, tmp_path, monkeypatch):
+    """`if args.horizon:` treated an explicit 0 as "not given". A flag that
+    quietly does nothing is worse than one that errors."""
+    from fplbot import cli
+
+    monkeypatch.setattr(cli, "_build_client", lambda settings: client)
+    monkeypatch.setenv("FPLBOT_CACHE", str(tmp_path))
+    out = tmp_path / "zero"
+    assert cli.main(["--horizon", "0", "--output", str(out)]) == 0
+
+    report = json.loads((tmp_path / "zero.json").read_text())
+    assert all(p["per_gameweek"] == [] for p in report["squad"]), (
+        "--horizon 0 was ignored"
+    )

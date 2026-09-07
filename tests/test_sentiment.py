@@ -244,3 +244,21 @@ def test_a_bare_sentence_initial_common_word_name_is_dropped():
         NewsItem(source="bbc", url="u", published_at=NOW, title="",
                  body="Cash was excellent at right back", score=10)
     ], players, CLUBS) == []
+
+
+def test_a_score_for_the_wrong_player_is_skipped_not_applied():
+    """The scorer echoes back the player_id it was given. If it comes back
+    different, the index and the player have desynchronised and applying the
+    score would attribute a claim to someone it was never about."""
+    players = [make_player(1, "Saka"), make_player(2, "Odegaard")]
+    mentions = resolve_mentions(
+        [item("Saka has a knock"), item("Odegaard has a knock")], players)
+    assert [m.player_id for m in mentions] == [1, 2]
+
+    agg = aggregate(mentions, {
+        0: MentionScore(1, -0.9, "injury", 0.9),    # matches mention 0
+        1: MentionScore(1, -0.9, "injury", 0.9),    # claims player 1 at index 1
+    }, NOW)
+
+    assert 2 not in agg, "a mismatched score was applied to the wrong player"
+    assert agg[1].volume == 1, "the mismatched score still counted as evidence"

@@ -294,12 +294,21 @@ def project_all(
             # Blanks score nothing; double gameweeks score twice.
             points = sum(
                 expected_points_one_gw(
-                    player, team_xgc.get(player.team_id, 1.4), f, mp, medians, form_mult)
+                    player, team_xgc.get(player.team_id, LEAGUE_DEFAULT_XGC),
+                    f, mp, medians, form_mult)
                 for f in gw_fixtures
             )
             per_gw.append(points * weight)
 
-        applied = settings.sentiment_cap * sig.availability_signal if sig else 0.0
+        def _nudge(signal: float) -> float:
+            return settings.sentiment_cap * max(-1.0, min(1.0, signal))
+
+        # Both channels are reported. Availability alone hid the form nudge,
+        # which is applied to attacking output and bonus.
+        applied = {
+            "availability": _nudge(sig.availability_signal) if sig else 0.0,
+            "form": _nudge(sig.form_signal) if sig else 0.0,
+        }
         out[player.id] = Projection(
             player_id=player.id,
             per_gameweek=per_gw,
@@ -308,7 +317,8 @@ def project_all(
             explanation=(
                 f"{player.web_name} ({player.position}, £{player.price_m}m): "
                 f"{sum(per_gw):.2f} pts over {settings.horizon} GW"
-                + (f", sentiment {applied:+.1%}" if sig else "")
+                + (f", sentiment {applied['availability']:+.1%} availability "
+                   f"and {applied['form']:+.1%} form" if sig else "")
             ),
         )
     return out

@@ -83,6 +83,10 @@ def test_report_totals_are_consistent(client):
     by_id = {p.id: p for p in players}
     assert report["total_cost"] == sum(by_id[i].now_cost for i in squad.players)
     assert report["captain"]["id"] == squad.captain_id
+    # The optimiser leftover is named for what it is. An unqualified "bank"
+    # next to a note about the manager's money read as the manager's bank.
+    assert report["optimiser_bank"] == squad.bank
+    assert "bank" not in report
 
 
 def test_transfer_diff_identifies_swaps(client):

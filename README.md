@@ -56,8 +56,14 @@ No credentials are required to run.
     fplbot --team-id 1234567 --free-transfers 2   # limit recommendations to what you can actually play
 
 With `--team-id`, transfers are only recommended when they use a free
-transfer or gain more than the 4 point hit cost of an extra one. Everything
-else is still shown, marked as not recommended, so nothing is hidden.
+transfer or gain more than the 4 point hit cost of an extra one. Your bank
+balance is read from the same public endpoint as your picks, so an upgrade
+you can actually fund is priced as affordable. A move you cannot fund is
+still shown, marked as not recommended, and never given a free transfer.
+Everything else is shown too, so nothing is hidden.
+
+An entry that has not played a gameweek yet has no picks endpoint. The run
+reports that and produces a squad anyway.
 
 ## Tests
 

@@ -327,3 +327,21 @@ def test_a_goalkeeper_facing_shots_gains_from_saves(client):
 
     assert (expected_points_one_gw(player=busy, **common)
             > expected_points_one_gw(player=quiet, **common) + 0.5)
+
+
+def test_both_sentiment_channels_are_reported(client):
+    """sentiment_applied named only the availability channel, so the form
+    nudge was applied to the numbers and invisible in the explanation."""
+    settings = Settings(cache_dir="/tmp/x")
+    target = max(client.players(), key=lambda p: p.expected_goals)
+    proj = project_all(
+        players=client.players(), teams=client.teams(),
+        fixtures=client.fixtures(), next_gw_id=client.next_gameweek().id,
+        settings=settings,
+        sentiment={target.id: PlayerSentiment(target.id, availability_signal=0.0,
+                                              form_signal=1.0, volume=5)})
+
+    applied = proj[target.id].sentiment_applied
+    assert applied["availability"] == 0.0
+    assert applied["form"] == settings.sentiment_cap
+    assert "form" in proj[target.id].explanation

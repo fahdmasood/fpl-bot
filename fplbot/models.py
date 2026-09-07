@@ -139,7 +139,10 @@ class Projection:
     player_id: int
     per_gameweek: list[float]
     total: float
-    sentiment_applied: float
+    # Both nudge channels, as fractions: {"availability": x, "form": y}.
+    # Reporting only availability made the form nudge invisible even though
+    # it was applied.
+    sentiment_applied: dict[str, float]
     explanation: str
 
 

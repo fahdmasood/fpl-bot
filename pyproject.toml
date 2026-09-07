@@ -6,7 +6,10 @@ dependencies = [
     "requests>=2.32",
     "feedparser>=6.0",
     "praw>=7.7",
-    "pulp>=2.8",
+    # PuLP 4.0 removes direct LpVariable(name, ...) construction, which
+    # optimize.py relies on, and 3.x already warns about it on every
+    # variable. Pinned below 4 until that call site is migrated.
+    "pulp>=2.8,<4",
 ]
 
 [project.optional-dependencies]
@@ -17,8 +20,9 @@ fplbot = "fplbot.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# PuLP emits thousands of deprecation warnings per run, which buries any
-# genuine warning the suite raises.
+# PuLP emits one 4.0 migration warning per variable, thousands per run,
+# which buries any genuine warning the suite raises. The dependency is
+# pinned below 4 so the underlying call site still works.
 filterwarnings = ["ignore::DeprecationWarning:pulp.*"]
 
 [build-system]
