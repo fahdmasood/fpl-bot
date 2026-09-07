@@ -13,6 +13,11 @@ from fplbot.news import SOURCE_TRUST
 
 log = logging.getLogger(__name__)
 
+# A mention is only allowed to influence the signal if its weight is within
+# this fraction of the best evidence available for that player. Without it,
+# a large enough pile of weak chatter drowns out one confident report.
+RELEVANCE_FLOOR = 0.5
+
 AVAILABILITY_CATEGORIES = {"injury", "rotation"}
 FORM_CATEGORIES = {"form", "hype"}
 VALID_CATEGORIES = AVAILABILITY_CATEGORIES | FORM_CATEGORIES
@@ -48,12 +53,19 @@ def resolve_mentions(
         for alias, real in ALIASES.items():
             lowered = re.sub(rf"\b{re.escape(alias)}\b", real.lower(), lowered)
 
+        # One comment yields at most one mention per player. A player whose
+        # web name contains a space, such as "De Bruyne", is indexed under
+        # both the full name and the surname, so a single mention would
+        # otherwise match twice and count as two independent pieces of
+        # evidence.
+        matched: dict[int, str] = {}
+
         for key, matches in index.items():
             if not re.search(rf"\b{re.escape(key)}\b", lowered):
                 continue
 
             if len(matches) == 1:
-                mentions.append(Mention(matches[0].id, item, key))
+                matched.setdefault(matches[0].id, key)
                 continue
 
             # Ambiguous surname. Resolve by club named in the same text, or
@@ -63,9 +75,12 @@ def resolve_mentions(
                 if team_names.get(p.team_id, "\0").lower() in lowered
             ]
             if len(disambiguated) == 1:
-                mentions.append(Mention(disambiguated[0].id, item, key))
+                matched.setdefault(disambiguated[0].id, key)
             else:
                 log.debug("dropped ambiguous mention %r", key)
+
+        for player_id, key in matched.items():
+            mentions.append(Mention(player_id, item, key))
 
     return mentions
 
@@ -187,60 +202,66 @@ def aggregate(
     now: datetime,
     half_life_days: float = 7.0,
 ) -> dict[int, PlayerSentiment]:
-    by_player: dict[int, dict] = {}
+    buckets: dict[int, dict] = {}
 
     for index, mention in enumerate(mentions):
         score = scores.get(index)
         if score is None:
             continue
+
         age_days = (now - mention.item.published_at).total_seconds() / 86400
         # Trust tier discounts sources that speculate; see news.SOURCE_TRUST.
         trust = SOURCE_TRUST.get(mention.item.source, 0.6)
         weight = (min(1.0, max(0.0, score.confidence)) * trust
                   * 0.5 ** (age_days / half_life_days))
-        bucket = by_player.setdefault(
-            mention.player_id,
-            {"avail": 0.0, "avail_w": 0.0, "avail_max": 0.0,
-             "form": 0.0, "form_w": 0.0, "form_max": 0.0,
-             "volume": 0, "evidence": []},
-        )
-        bucket["volume"] += 1
         clamped = max(-1.0, min(1.0, score.sentiment))
 
-        if score.category in AVAILABILITY_CATEGORIES:
-            bucket["avail"] += clamped * weight
-            bucket["avail_w"] += weight
-            bucket["avail_max"] = max(bucket["avail_max"], weight)
-        else:
-            bucket["form"] += clamped * weight
-            bucket["form_w"] += weight
-            bucket["form_max"] = max(bucket["form_max"], weight)
+        bucket = buckets.setdefault(
+            mention.player_id,
+            {"avail": [], "form": [], "volume": 0, "evidence": []},
+        )
+        bucket["volume"] += 1
+        channel = "avail" if score.category in AVAILABILITY_CATEGORIES else "form"
+        bucket[channel].append((clamped, weight))
 
         if len(bucket["evidence"]) < 3:
             bucket["evidence"].append(mention.item.body[:160])
 
-    def _signal(total: float, weight_sum: float, best_weight: float) -> float:
-        """Weighted mean, attenuated by the strength of the best evidence.
+    def _signal(rows: list[tuple[float, float]]) -> float:
+        """Direction from the strong evidence, attenuated by how strong it is.
 
-        The mean alone gives direction without letting volume matter: ten
-        mentions of the same claim say no more than one. But a mean also
-        cancels the decay for a lone mention, (s x w) / w = s, so a
-        fortnight-old "he has a knock" would move the projection exactly as
-        much as this morning's. Multiplying by the single best weight (its
-        confidence x source trust x recency) restores that attenuation
-        without reintroducing volume: adding more mentions cannot push the
-        signal past what the strongest one supports.
+        Three properties have to hold together:
+
+        1. Repeating a claim adds nothing. Ten copies of one comment say no
+           more than one, so the mean is taken rather than the sum.
+        2. Stale or unconfident evidence moves the projection less, which the
+           mean alone cannot express: for a single mention (s * w) / w = s
+           cancels the decay entirely. Multiplying by the best weight
+           restores it.
+        3. A swarm of weak mentions cannot outvote one strong one. Averaging
+           over everything let 600 low confidence comments saying "he is
+           fine" overturn a confident wire service injury report. Only
+           mentions within RELEVANCE_FLOOR of the best evidence take part.
         """
-        if weight_sum <= 0:
+        if not rows:
             return 0.0
-        return (total / weight_sum) * min(1.0, best_weight)
+        best = max(w for _, w in rows)
+        if best <= 0:
+            return 0.0
+
+        strong = [(s, w) for s, w in rows if w >= RELEVANCE_FLOOR * best]
+        total = sum(w for _, w in strong)
+        if total <= 0:
+            return 0.0
+        mean = sum(s * w for s, w in strong) / total
+        return max(-1.0, min(1.0, mean * min(1.0, best)))
 
     out: dict[int, PlayerSentiment] = {}
-    for player_id, b in by_player.items():
+    for player_id, b in buckets.items():
         out[player_id] = PlayerSentiment(
             player_id=player_id,
-            availability_signal=_signal(b["avail"], b["avail_w"], b["avail_max"]),
-            form_signal=_signal(b["form"], b["form_w"], b["form_max"]),
+            availability_signal=_signal(b["avail"]),
+            form_signal=_signal(b["form"]),
             # Volume is reported, never modelled: it measures popularity,
             # not quality, and would bias toward already-owned players.
             volume=b["volume"],

@@ -17,8 +17,8 @@ def make_player(pid, name, team=1):
     })
 
 
-def item(body, hours_ago=1):
-    return NewsItem(source="reddit-comment", url="u",
+def item(body, hours_ago=1, src="bbc"):
+    return NewsItem(source=src, url="u",
                     published_at=NOW - timedelta(hours=hours_ago),
                     title="t", body=body, score=10)
 
@@ -82,6 +82,32 @@ def test_aggregate_decays_old_mentions():
     fresh = aggregate(recent, score, NOW)[1].availability_signal
     stale = aggregate(old, score, NOW)[1].availability_signal
     assert abs(stale) < abs(fresh)
+
+
+def test_one_comment_yields_one_mention_per_player():
+    """A player indexed under both a full name and a surname, such as
+    "De Bruyne", must not match twice and count as two pieces of evidence."""
+    players = [make_player(1, "De Bruyne")]
+    mentions = resolve_mentions([item("De Bruyne was brilliant tonight")], players)
+    assert len(mentions) == 1, [m.matched_text for m in mentions]
+
+
+def test_a_swarm_of_weak_mentions_cannot_overturn_a_strong_one():
+    """600 low confidence comments saying a player is fine must not flip a
+    confident injury report from a trusted source. Volume measures how much a
+    player is discussed, not how reliable the claim is."""
+    players = [make_player(1, "Saka")]
+    strong = item("Saka has been ruled out with a hamstring injury")
+    weak = [item("Saka is fine, saw him training", src="reddit-comment")
+            for _ in range(600)]
+    mentions = resolve_mentions([strong] + weak, players)
+
+    scores = {0: MentionScore(1, sentiment=-1.0, category="injury", confidence=1.0)}
+    for i in range(1, len(mentions)):
+        scores[i] = MentionScore(1, sentiment=0.6, category="injury", confidence=0.15)
+
+    signal = aggregate(mentions, scores, NOW)[1].availability_signal
+    assert signal < -0.5, f"a comment flood overturned a wire report: {signal}"
 
 
 def test_volume_does_not_inflate_the_signal():
