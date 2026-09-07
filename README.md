@@ -47,6 +47,11 @@ No credentials are required to run.
     fplbot --output report          # writes report.json and report.html
     fplbot --team-id 1234567        # also diff against your current squad
     fplbot --horizon 1              # next gameweek only
+    fplbot --team-id 1234567 --free-transfers 2   # limit recommendations to what you can actually play
+
+With `--team-id`, transfers are only recommended when they use a free
+transfer or gain more than the 4 point hit cost of an extra one. Everything
+else is still shown, marked as not recommended, so nothing is hidden.
 
 ## Tests
 
