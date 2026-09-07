@@ -885,11 +885,11 @@ def test_sentiment_modifier_respects_the_cap():
         "starts": 10,
     }
     player = Player.from_api(raw)
-    neutral = minutes_probability(player, sentiment=None)
+    neutral = minutes_probability(player, games_played=3, sentiment=None)
     best = minutes_probability(
-        player, PlayerSentiment(1, availability_signal=1.0, form_signal=0.0, volume=5))
+        player, 3, PlayerSentiment(1, availability_signal=1.0, form_signal=0.0, volume=5))
     worst = minutes_probability(
-        player, PlayerSentiment(1, availability_signal=-1.0, form_signal=0.0, volume=5))
+        player, 3, PlayerSentiment(1, availability_signal=-1.0, form_signal=0.0, volume=5))
     assert best <= neutral * 1.15 + 1e-9
     assert worst >= neutral * 0.85 - 1e-9
 
@@ -906,8 +906,37 @@ def test_sentiment_cannot_rescue_a_flagged_player():
     }
     player = Player.from_api(raw)
     hyped = minutes_probability(
-        player, PlayerSentiment(2, availability_signal=1.0, form_signal=1.0, volume=50))
+        player, 3, PlayerSentiment(2, availability_signal=1.0, form_signal=1.0, volume=50))
     assert hyped == 0.0
+
+
+def test_a_substituted_starter_is_not_treated_as_a_rotation_risk():
+    """A player who starts every match but comes off on seventy minutes is
+    nailed on. Judging raw minutes against a three full match threshold put
+    half of all regular starters in the same bucket as fringe players.
+    """
+    from fplbot.models import Player
+    raw = {
+        "id": 1, "web_name": "X", "element_type": 4, "team": 1, "now_cost": 90,
+        "status": "a", "chance_of_playing_next_round": None, "minutes": 243,
+        "form": "5.0", "selected_by_percent": "10", "expected_goals": "2.3",
+        "expected_assists": "0.1", "expected_goals_conceded": "3.0",
+        "defensive_contribution_per_90": "1.0", "ict_index": "80", "bps": 200,
+        "starts": 3,
+    }
+    started_every_game = Player.from_api(raw)
+    played_every_minute = Player.from_api({**raw, "minutes": 270})
+    fringe = Player.from_api({**raw, "minutes": 60, "starts": 0})
+
+    nailed = minutes_probability(started_every_game, games_played=3)
+    ever_present = minutes_probability(played_every_minute, games_played=3)
+    bench = minutes_probability(fringe, games_played=3)
+
+    assert nailed > 0.85, nailed
+    assert ever_present >= nailed
+    assert bench < 0.35, bench
+    # One minute of football must not halve a projection.
+    assert ever_present - nailed < 0.15
 
 
 def test_a_strong_defence_beats_a_weak_one_on_clean_sheets():
@@ -1068,7 +1097,11 @@ import statistics
 from fplbot.config import SCORING, Settings
 from fplbot.models import Fixture, Player, PlayerSentiment, Projection, Team
 
-MINUTES_FLOOR = 270  # three full matches; used for selection share, not rates
+# Minutes threshold for inclusion in the position median pools. Set to two
+# full matches rather than three: at three, only players who are never
+# substituted qualify, which biases the pools toward goalkeepers and centre
+# backs and drags the attacking priors down.
+MEDIAN_POOL_MINUTES = 180
 
 # Prior weight in matches when regressing a rate toward its cohort mean.
 # Chosen by measurement, not feel: K=2 lets a clean-sheet probability breach
@@ -1111,7 +1144,7 @@ def position_medians(players: list[Player]) -> dict[str, dict[str, float]]:
     out: dict[str, dict[str, float]] = {}
     for position in ("GKP", "DEF", "MID", "FWD"):
         pool = [p for p in players
-                if p.position == position and p.minutes >= MINUTES_FLOOR]
+                if p.position == position and p.minutes >= MEDIAN_POOL_MINUTES]
         if not pool:
             out[position] = {"xg": 0.0, "xa": 0.0, "bps": 0.0, "dc": 0.0}
             continue
@@ -1156,9 +1189,22 @@ def team_xgc_per_90(players: list[Player]) -> dict[int, float]:
 
 
 def minutes_probability(
-    player: Player, sentiment: PlayerSentiment | None = None, cap: float = 0.15
+    player: Player,
+    games_played: int,
+    sentiment: PlayerSentiment | None = None,
+    cap: float = 0.15,
 ) -> float:
     """Probability the player is on the pitch, in [0, 1].
+
+    Measured as the share of available minutes actually played. A player who
+    starts every match but is routinely withdrawn on seventy minutes is a
+    nailed starter, not a rotation risk.
+
+    An earlier version compared raw minutes to a three full match threshold
+    and assigned a flat one half to anyone below it. That put 84 of the 163
+    players who had started every match into the same bucket as fringe
+    squad players, purely because they had been substituted at some point.
+    A player on 269 minutes scored half of one on 270.
 
     The API's own injury flag outranks the internet: a player who is not
     available cannot be talked back onto the pitch by sentiment.
@@ -1167,10 +1213,11 @@ def minutes_probability(
     if base == 0.0:
         return 0.0
 
-    if player.minutes >= MINUTES_FLOOR:
-        share = min(1.0, player.minutes / (player.starts * 90) if player.starts else 0.7)
+    if games_played > 0:
+        share = min(1.0, player.minutes / (games_played * 90))
     else:
-        share = 0.5
+        # Nothing played yet, so nothing to measure. Assume a squad player.
+        share = 0.7
     base *= share
 
     if sentiment is not None:
@@ -1279,6 +1326,9 @@ def project_all(
     weights = settings.decay_weights
     medians = position_medians(players)
     team_xgc = team_xgc_per_90(players)
+    # Gameweeks completed so far. Used to judge what share of the available
+    # minutes each player has actually been on the pitch for.
+    games_played = max(0, next_gw_id - 1)
 
     fixtures_by_gw: dict[int, list[Fixture]] = {}
     for f in fixtures:
@@ -1295,7 +1345,8 @@ def project_all(
             # Sentiment applies to GW+1 only. Spreading it across the decayed
             # horizon would dilute the +/-15% guardrail to roughly +/-6%.
             sig_for_gw = sig if offset == 0 else None
-            mp = minutes_probability(player, sig_for_gw, settings.sentiment_cap)
+            mp = minutes_probability(player, games_played, sig_for_gw,
+                                     settings.sentiment_cap)
             form_mult = 1.0
             if sig_for_gw is not None:
                 form_mult = 1 + settings.sentiment_cap * max(
@@ -1331,7 +1382,7 @@ def project_all(
 - [ ] **Step 4: Run tests**
 
 Run: `python3 -m pytest tests/test_projection.py -v`
-Expected: 20 passed
+Expected: 21 passed
 
 - [ ] **Step 5: Commit**
 
@@ -2855,9 +2906,53 @@ def _degradation_notes(stats: dict) -> list[str]:
     return notes
 
 
+HIT_COST = 4  # points charged for each transfer beyond your free ones
+
+
+def annotate_transfer_plan(moves: list[dict], free_transfers: int) -> list[dict]:
+    """Mark which moves your free transfers cover and which are worth a hit.
+
+    A squad differs from the optimum by however many players it differs by,
+    often ten or more. Listing all of them is a wish list, not advice. You get
+    one free transfer per gameweek, banked up to five, and every transfer
+    beyond that costs four points.
+
+    Moves are already sorted by projected gain, so the free transfers go to
+    the best ones. Each move past that is judged on its own: a gain larger
+    than the four point hit is worth taking, a smaller one is not.
+
+    Note the comparison is slightly generous to taking hits, because the gain
+    is spread across the projection horizon while the hit is charged once.
+    """
+    planned = []
+    for rank, move in enumerate(moves):
+        free = rank < free_transfers
+        hit = 0 if free else HIT_COST
+        move = {
+            **move,
+            "uses_free_transfer": free,
+            "hit_cost": hit,
+            "net_gain": round(move["gain"] - hit, 2),
+        }
+        move["recommended"] = (
+            move["affordable"] and (free or move["net_gain"] > 0)
+        )
+        planned.append(move)
+    return planned
+
+
 def build_report(squad: Squad, players, projections, sentiment, stats,
-                 gameweek: Gameweek, current_squad=None) -> dict:
+                 gameweek: Gameweek, current_squad=None,
+                 free_transfers: int = 1) -> dict:
     by_id = {p.id: p for p in players}
+
+    transfers = (
+        annotate_transfer_plan(
+            transfer_diff(current_squad, squad.players, players, projections),
+            free_transfers,
+        )
+        if current_squad else []
+    )
 
     reasons = _degradation_notes(stats)
 
@@ -2880,13 +2975,15 @@ def build_report(squad: Squad, players, projections, sentiment, stats,
         "squad": [_player_row(by_id[i], projections[i], sentiment.get(i))
                   for i in squad.players],
         "starting_xi": squad.starting_xi,
-        "transfers": (
-            transfer_diff(current_squad, squad.players, players, projections)
-            if current_squad else []
-        ),
+        "transfers": transfers,
+        "transfers_recommended": [m for m in transfers if m["recommended"]],
+        "free_transfers": free_transfers,
         "transfers_note": (
-            "Moves are paired within position and assume no money in the bank, "
-            "since the bot does not know your actual balance."
+            f"You have {free_transfers} free transfer(s). Moves beyond that "
+            f"cost {HIT_COST} points each and are only recommended when the "
+            "projected gain exceeds the hit. Pairing is within position, and "
+            "affordability assumes no money in the bank, since the bot does "
+            "not know your actual balance."
             if current_squad else ""
         ),
     }
@@ -2937,14 +3034,17 @@ def render_html(report: dict) -> str:
             f"<td>{esc(m['in']['name'])} (£{esc(m['in']['price_m'])}m, "
             f"{esc(m['in']['projected_points'])})</td>"
             f"<td>{esc(m['gain'])}</td>"
-            f"<td>{'yes' if m.get('affordable') else 'no'}</td></tr>"
+            f"<td>{'free' if m['uses_free_transfer'] else str(m['hit_cost']) + ' pts'}</td>"
+            f"<td>{esc(m['net_gain'])}</td>"
+            f"<td>{'yes' if m['recommended'] else 'no'}</td></tr>"
             for m in report["transfers"]
         )
         transfers = (
             "<h2>Suggested transfers</h2>"
             f"<p>{esc(report.get('transfers_note', ''))}</p>"
             "<table><tr><th>Pos</th><th>Out</th><th>In</th><th>Gain</th>"
-            f"<th>Affordable</th></tr>{moves}</table>"
+            "<th>Cost</th><th>Net</th><th>Do it</th>"
+            f"</tr>{moves}</table>"
         )
 
     coverage = (
