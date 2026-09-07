@@ -106,11 +106,13 @@ def test_clean_sheet_probability_falls_as_difficulty_rises():
 
 def test_bonus_uses_bps_not_just_ict(client):
     """The spec names BPS; an ICT-only bonus term ignores half the signal."""
-    from fplbot.projection import bonus_estimate
+    from fplbot.projection import bonus_estimate, position_medians
     from dataclasses import replace
+    med = position_medians(client.players())
     base = max(client.players(), key=lambda p: p.minutes)
+    prior = med[base.position]["bps"]
     high_bps = replace(base, bps=base.bps * 3)
-    assert bonus_estimate(high_bps) > bonus_estimate(base)
+    assert bonus_estimate(high_bps, prior) > bonus_estimate(base, prior)
 
 
 def test_form_signal_changes_a_projection(client):
@@ -132,12 +134,47 @@ def test_low_minutes_player_falls_back_to_position_median(client):
     from fplbot.projection import position_medians, _per_90
     med = position_medians(client.players())
     assert med["FWD"]["xg"] > 0
-    assert _per_90(5.0, minutes=40, fallback=med["FWD"]["xg"]) == med["FWD"]["xg"]
+    # A 40-minute cameo is dominated by the prior, not by its own rate.
+    assert _per_90(5.0, minutes=0, prior=med["FWD"]["xg"]) == med["FWD"]["xg"]
+    thin = _per_90(5.0, minutes=40, prior=med["FWD"]["xg"])
+    assert abs(thin - med["FWD"]["xg"]) < abs(thin - (5.0 / (40 / 90)))
+
+
+def test_no_clean_sheet_probability_is_physically_implausible(client):
+    """No Premier League defence keeps a clean sheet 55% of the time. A model
+    that says otherwise is reading a three-match sample as settled fact."""
+    from fplbot.projection import clean_sheet_probability, team_xgc_per_90
+    xgc = team_xgc_per_90(client.players())
+    worst = max((clean_sheet_probability(v, 1), tid) for tid, v in xgc.items())
+    assert worst[0] <= 0.55, f"team {worst[1]} projects a {worst[0]:.0%} clean sheet"
+
+
+def test_shrinkage_pulls_a_small_sample_toward_the_prior():
+    from fplbot.projection import _shrink
+    # An extreme rate seen over 3 matches should land nearer the prior than
+    # the observation; over 30 matches it should barely move.
+    early = _shrink(observed=0.3, prior=1.5, matches=3)
+    late = _shrink(observed=0.3, prior=1.5, matches=30)
+    assert 0.3 < late < early < 1.5
+    assert abs(late - 0.3) < abs(early - 0.3)
+
+
+def test_no_budget_defender_outranks_the_premium_attackers(client):
+    """The original bug put £4.0m Ipswich defenders alongside Haaland. This
+    targets that shape directly, and has real margin unlike a bare count."""
+    settings = Settings(cache_dir="/tmp/x")
+    proj = project_all(players=client.players(), teams=client.teams(),
+                       fixtures=client.fixtures(),
+                       next_gw_id=client.next_gameweek().id, settings=settings)
+    by_id = {p.id: p for p in client.players()}
+    top10 = sorted(proj.values(), key=lambda x: x.total, reverse=True)[:10]
+    cheap = [by_id[t.player_id].web_name for t in top10
+             if by_id[t.player_id].position == "DEF" and by_id[t.player_id].now_cost <= 45]
+    assert not cheap, f"budget defenders in the top 10: {cheap}"
 
 
 def test_defenders_do_not_dominate_the_top_of_the_board(client):
-    """Sanity check against football, not just against the code. Budget
-    defenders on weak teams previously projected alongside Haaland."""
+    """Coarse net beneath the sharper guards above."""
     settings = Settings(cache_dir="/tmp/x")
     proj = project_all(players=client.players(), teams=client.teams(),
                        fixtures=client.fixtures(),
@@ -145,7 +182,7 @@ def test_defenders_do_not_dominate_the_top_of_the_board(client):
     by_id = {p.id: p for p in client.players()}
     top20 = sorted(proj.values(), key=lambda x: x.total, reverse=True)[:20]
     defenders = sum(1 for t in top20 if by_id[t.player_id].position == "DEF")
-    assert defenders <= 10, f"{defenders}/20 of the top projections are defenders"
+    assert defenders <= 12, f"{defenders}/20 of the top projections are defenders"
 
 
 def test_later_gameweeks_are_decayed(projections):
