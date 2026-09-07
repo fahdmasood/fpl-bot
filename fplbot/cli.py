@@ -62,15 +62,17 @@ def run(settings: Settings, client: FplClient, scorer, entry_id: int | None = No
     squad = pick_squad(players, projections, rules)
 
     current = None
+    bank = 0
     if entry_id and gameweek.id > 1:
         try:
-            current = client.entry_picks(entry_id, gameweek.id - 1)
+            current, bank = client.entry_picks(entry_id, gameweek.id - 1)
         except Exception as exc:
             # GW1 has no prior squad, and a private or wrong id 404s. Neither
             # is worth aborting an otherwise good run for.
             log.warning("could not read entry %s: %s", entry_id, exc)
     return build_report(squad, players, projections, sentiment, stats,
-                        gameweek, current, free_transfers=free_transfers)
+                        gameweek, current, free_transfers=free_transfers,
+                        bank=bank)
 
 
 def main(argv=None) -> int:

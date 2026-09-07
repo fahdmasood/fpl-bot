@@ -184,7 +184,16 @@ class FplClient:
             "quota": squad_quota,
         }
 
-    def entry_picks(self, entry_id: int, event: int) -> list[int]:
+    def entry_picks(self, entry_id: int, event: int) -> tuple[list[int], int]:
+        """The squad's element ids and the money in its bank.
+
+        The bank arrives in the same payload as the picks. Returning only the
+        ids meant every transfer downstream was priced as if the manager had
+        nothing to spend, so no upgrade was ever affordable.
+        """
         key = f"entry-{entry_id}-{event}"
         payload = self._get(key, f"{BASE}/entry/{entry_id}/event/{event}/picks/")
-        return [p["element"] for p in payload["picks"]]
+        ids = [p["element"] for p in payload["picks"]]
+        # Integer tenths of a million, like every other price in the API.
+        bank = payload.get("entry_history", {}).get("bank", 0) or 0
+        return ids, int(bank)

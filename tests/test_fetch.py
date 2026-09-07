@@ -126,3 +126,58 @@ def test_invalid_payload_raises_even_when_a_stale_cache_exists(client, tmp_path)
     client.session = BadPayloadSession()
     with pytest.raises(InvalidPayload):
         client.bootstrap()
+
+
+def test_entry_picks_returns_the_bank_alongside_the_element_ids(client):
+    """The bank sits in the same payload as the picks. Dropping it left the
+    report assuming every squad had nothing to spend."""
+    payload = {"picks": [{"element": 1}, {"element": 2}],
+               "entry_history": {"bank": 23, "value": 1004}}
+
+    class EntrySession:
+        calls = []
+
+        def get(self, url, **kwargs):
+            class R:
+                status_code = 200
+
+                @staticmethod
+                def json():
+                    return payload
+
+                @staticmethod
+                def raise_for_status():
+                    return None
+
+            return R()
+
+    client.session = EntrySession()
+    ids, bank = client.entry_picks(10541438, 1)
+    assert ids == [1, 2]
+    assert bank == 23
+
+
+def test_entry_picks_defaults_the_bank_to_zero_when_absent(client):
+    payload = {"picks": [{"element": 7}]}
+
+    class EntrySession:
+        calls = []
+
+        def get(self, url, **kwargs):
+            class R:
+                status_code = 200
+
+                @staticmethod
+                def json():
+                    return payload
+
+                @staticmethod
+                def raise_for_status():
+                    return None
+
+            return R()
+
+    client.session = EntrySession()
+    ids, bank = client.entry_picks(10541438, 2)
+    assert ids == [7]
+    assert bank == 0

@@ -146,15 +146,24 @@ def annotate_transfer_plan(moves: list[dict], free_transfers: int) -> list[dict]
     beyond that costs four points.
 
     Moves are already sorted by projected gain, so the free transfers go to
-    the best ones. Each move past that is judged on its own: a gain larger
-    than the four point hit is worth taking, a smaller one is not.
+    the best ones you can actually make. Affordability is checked BEFORE the
+    allocation: a free transfer handed to a move the money does not cover is
+    a free transfer thrown away, and it makes the affordable move below it
+    look like a four point hit when it would in fact be free.
+
+    Each move past the free ones is judged on its own: a gain larger than the
+    four point hit is worth taking, a smaller one is not.
 
     Note the comparison is slightly generous to taking hits, because the gain
     is spread across the projection horizon while the hit is charged once.
     """
     planned = []
-    for rank, move in enumerate(moves):
-        free = rank < free_transfers
+    free_used = 0
+    for move in moves:
+        affordable = bool(move["affordable"])
+        free = affordable and free_used < free_transfers
+        if free:
+            free_used += 1
         hit = 0 if free else HIT_COST
         move = {
             **move,
@@ -162,21 +171,23 @@ def annotate_transfer_plan(moves: list[dict], free_transfers: int) -> list[dict]
             "hit_cost": hit,
             "net_gain": round(move["gain"] - hit, 2),
         }
-        move["recommended"] = (
-            move["affordable"] and (free or move["net_gain"] > 0)
-        )
+        move["recommended"] = affordable and (free or move["net_gain"] > 0)
         planned.append(move)
     return planned
 
 
 def build_report(squad: Squad, players, projections, sentiment, stats,
                  gameweek: Gameweek, current_squad=None,
-                 free_transfers: int = 1) -> dict:
+                 free_transfers: int = 1, bank: int = 0) -> dict:
+    """`bank` is the manager's own money, in integer tenths of a million,
+    read from the entry's picks payload. Without it every upgrade that costs
+    more than the player it replaces is reported as unaffordable."""
     by_id = {p.id: p for p in players}
 
     transfers = (
         annotate_transfer_plan(
-            transfer_diff(current_squad, squad.players, players, projections),
+            transfer_diff(current_squad, squad.players, players, projections,
+                          bank=bank),
             free_transfers,
         )
         if current_squad else []
@@ -207,11 +218,12 @@ def build_report(squad: Squad, players, projections, sentiment, stats,
         "transfers_recommended": [m for m in transfers if m["recommended"]],
         "free_transfers": free_transfers,
         "transfers_note": (
-            f"You have {free_transfers} free transfer(s). Moves beyond that "
-            f"cost {HIT_COST} points each and are only recommended when the "
-            "projected gain exceeds the hit. Pairing is within position, and "
-            "affordability assumes no money in the bank, since the bot does "
-            "not know your actual balance."
+            f"You have {free_transfers} free transfer(s) and £{bank / 10}m in "
+            f"the bank. Moves beyond your free transfers cost {HIT_COST} "
+            "points each and are only recommended when the projected gain "
+            "exceeds the hit. Pairing is within position, and a move you "
+            "cannot fund is shown but never recommended and never given a "
+            "free transfer."
             if current_squad else ""
         ),
     }

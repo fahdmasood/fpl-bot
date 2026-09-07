@@ -176,3 +176,58 @@ def test_html_renders_and_escapes(client):
     html = render_html(report)
     assert "<html" in html.lower()
     assert "<script>" not in html
+
+
+def test_money_in_the_bank_makes_an_upgrade_recommendable(client):
+    """The bank was dropped on the floor between fetch and the report, so
+    every upgrade priced above the player it replaced looked unaffordable and
+    nothing was ever recommended."""
+    report, players, projections, squad = _report(client)
+    by_id = {p.id: p for p in players}
+    current = list(squad.players)
+    # Sell the dearest midfielder in the optimal squad and hold the cheapest
+    # one available instead, so buying him back costs real money.
+    target = max((i for i in current if by_id[i].position == "MID"),
+                 key=lambda i: by_id[i].now_cost)
+    cheap = min((p for p in players
+                 if p.id not in current and p.position == "MID"),
+                key=lambda p: p.now_cost)
+    current[current.index(target)] = cheap.id
+    shortfall = by_id[target].now_cost - cheap.now_cost
+    assert shortfall > 0, "fixture must require money to fund the move"
+
+    stats = {"items_fetched": 0, "items_after_filter": 0, "sources_used": [],
+             "sources_absent": ["news-rss", "reddit"], "reddit_available": False,
+             "reddit_status": "not_configured"}
+    from fplbot.report import build_report
+
+    broke = build_report(squad, players, projections, {}, stats,
+                         client.next_gameweek(), current, bank=0)
+    assert broke["transfers_recommended"] == [], "nothing is affordable on nothing"
+
+    funded = build_report(squad, players, projections, {}, stats,
+                          client.next_gameweek(), current, bank=shortfall)
+    assert funded["transfers_recommended"], (
+        "money in the bank must make the upgrade recommendable"
+    )
+
+
+def test_an_unaffordable_move_does_not_burn_a_free_transfer():
+    """Free transfers were allotted by rank before affordability was checked,
+    so the one free transfer was spent on a move that would never be made and
+    a smaller affordable move was left to look like a 4 point hit."""
+    moves = [
+        {"position": "FWD", "gain": 9.0, "affordable": False, "cost_change": 40,
+         "out": {"name": "a"}, "in": {"name": "b"}},
+        {"position": "DEF", "gain": 2.0, "affordable": True, "cost_change": 0,
+         "out": {"name": "c"}, "in": {"name": "d"}},
+    ]
+    planned = annotate_transfer_plan(moves, free_transfers=1)
+
+    assert planned[0]["uses_free_transfer"] is False
+    assert planned[0]["recommended"] is False
+    # The free transfer falls through to the affordable move, which is only
+    # worth making because it is free: a 2 point gain loses to a 4 point hit.
+    assert planned[1]["uses_free_transfer"] is True
+    assert planned[1]["hit_cost"] == 0
+    assert planned[1]["recommended"] is True
