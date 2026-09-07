@@ -95,9 +95,25 @@ def test_a_broken_reddit_is_distinguishable_from_an_absent_one(monkeypatch):
 
 def test_distinct_stories_sharing_an_opening_are_not_merged():
     """Syndicated copy shares lead sentences. Keying dedupe on a prefix would
-    merge two different stories and throw away real evidence."""
-    lead = "The Premier League returns this weekend after the international break. "
+    merge two different stories and throw away real evidence.
+
+    The shared lead must exceed the old 200-character prefix, or this test
+    passes against the buggy code too and guards nothing. The assertion below
+    enforces that, so editing the text cannot silently disarm the test.
+    """
+    lead = (
+        "The Premier League returns this weekend after the international break, "
+        "with several managers facing selection headaches ahead of a congested "
+        "run of fixtures that will test squad depth right across the division "
+        "over the coming weeks. Here is the latest team news. "
+    )
+    assert len(normalise(lead)) > 200, "lead too short to exercise the old bug"
+
     a = item(body=lead + "Saka is expected to start against Chelsea.")
     b = item(source="sky", body=lead + "Haaland has been ruled out with a knock.")
+
+    # Precondition: under the old truncating key these two collided.
+    assert normalise(a.body)[:200] == normalise(b.body)[:200]
+
     kept = filter_items([a, b], Settings(cache_dir="/tmp/x"), NOW)
     assert len(kept) == 2, "two different stories were merged as duplicates"
