@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +21,38 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; fplbot/0.1)"}
 
 def _dt(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
+
+
+_VALIDATORS = {
+    "bootstrap-static": lambda p: isinstance(p, dict) and "elements" in p and "events" in p,
+    "fixtures": lambda p: isinstance(p, list),
+}
+
+
+def _validate_payload(key: str, payload: dict | list) -> bool:
+    """Validate a payload before caching. Returns True if valid, False if invalid."""
+    if key in _VALIDATORS:
+        return _VALIDATORS[key](payload)
+    # For entry-* keys, require "picks" in the dict
+    if key.startswith("entry-"):
+        return isinstance(payload, dict) and "picks" in payload
+    # Unknown keys are valid by default (permissive)
+    return True
+
+
+def _select_next_gameweek(weeks: list[Gameweek], now: datetime) -> Gameweek:
+    """Select the next gameweek from a list given current time.
+
+    Returns the gameweek marked is_next, or the first future deadline,
+    or the last gameweek if all are in the past.
+    """
+    for gw in weeks:
+        if gw.is_next:
+            return gw
+    future = [gw for gw in weeks if gw.deadline_time > now]
+    if future:
+        return future[0]
+    return weeks[-1]
 
 
 class FplClient:
@@ -45,7 +78,14 @@ class FplClient:
             response = self.session.get(url, headers=HEADERS, timeout=30)
             response.raise_for_status()
             payload = response.json()
-            self._cache_path(key).write_text(json.dumps(payload))
+            # Validate before caching to avoid poisoning the cache
+            if not _validate_payload(key, payload):
+                raise ValueError(f"invalid payload for {key}: validation failed")
+            # Atomic write: write to temp file and replace in place
+            path = self._cache_path(key)
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(payload))
+            os.replace(tmp, path)
         except Exception as exc:
             # A stale answer beats no answer. If the network is down at the
             # deadline, an old projection is still actionable.
@@ -54,7 +94,11 @@ class FplClient:
                 raise
             age = self.cache_age_seconds(key)
             log.warning("fetch %s failed (%s); using cache %.0fs old", key, exc, age)
-            payload = json.loads(path.read_text())
+            try:
+                payload = json.loads(path.read_text())
+            except Exception as cache_exc:
+                # If the cached file is unreadable, raise the original exception
+                raise exc from cache_exc
 
         self._memory[key] = payload
         return payload
@@ -90,16 +134,8 @@ class FplClient:
 
     def next_gameweek(self) -> Gameweek:
         weeks = self.gameweeks()
-        for gw in weeks:
-            if gw.is_next:
-                return gw
-        # Past the final deadline the API sets no is_next; fall back to the
-        # first gameweek whose deadline is still ahead of us.
         now = datetime.now(tz=weeks[0].deadline_time.tzinfo)
-        future = [gw for gw in weeks if gw.deadline_time > now]
-        if future:
-            return future[0]
-        return weeks[-1]
+        return _select_next_gameweek(weeks, now)
 
     def fixtures(self, event: int | None = None) -> list[Fixture]:
         raw = self._get("fixtures", f"{BASE}/fixtures/")
