@@ -3167,6 +3167,59 @@ def test_later_gameweek_projections_do_not_use_earlier_results(client, tmp_path)
     )
 
 
+def test_an_entry_with_no_picks_yet_does_not_break_the_run(client, tmp_path):
+    """A team registered mid season has no picks until it has played a
+    gameweek, and that endpoint 404s. A squad must still be produced."""
+    from fplbot.cli import run
+
+    class NoPicks:
+        def __getattr__(self, name):
+            return getattr(client, name)
+
+        def entry_picks(self, entry_id, event):
+            raise RuntimeError("404 Not Found")
+
+    report = run(Settings(cache_dir=tmp_path), NoPicks(), NullScorer(),
+                 entry_id=10541438)
+    assert len(report["squad"]) == 15
+    assert report["transfers"] == []
+
+
+def test_free_transfers_limit_what_is_recommended(client, tmp_path):
+    """Listing every difference from the optimum is a wish list. Only moves
+    covered by a free transfer, or gaining more than the four point hit,
+    should be recommended."""
+    from fplbot.report import annotate_transfer_plan
+
+    moves = [
+        {"position": "MID", "gain": 9.0, "affordable": True,
+         "out": {"name": "a"}, "in": {"name": "b"}, "cost_change": 0},
+        {"position": "MID", "gain": 5.0, "affordable": True,
+         "out": {"name": "c"}, "in": {"name": "d"}, "cost_change": 0},
+        {"position": "DEF", "gain": 2.0, "affordable": True,
+         "out": {"name": "e"}, "in": {"name": "f"}, "cost_change": 0},
+    ]
+    planned = annotate_transfer_plan(moves, free_transfers=1)
+
+    assert planned[0]["uses_free_transfer"] is True
+    assert planned[0]["recommended"] is True
+    # Second move gains 5 against a 4 point hit, so it is narrowly worth it.
+    assert planned[1]["uses_free_transfer"] is False
+    assert planned[1]["net_gain"] == 1.0
+    assert planned[1]["recommended"] is True
+    # Third gains 2 against a 4 point hit, so it is not.
+    assert planned[2]["net_gain"] == -2.0
+    assert planned[2]["recommended"] is False
+
+
+def test_an_unaffordable_move_is_never_recommended(client):
+    from fplbot.report import annotate_transfer_plan
+    moves = [{"position": "FWD", "gain": 20.0, "affordable": False,
+              "out": {"name": "a"}, "in": {"name": "b"}, "cost_change": 50}]
+    planned = annotate_transfer_plan(moves, free_transfers=1)
+    assert planned[0]["recommended"] is False
+
+
 def test_cli_writes_json_and_html(client, tmp_path, monkeypatch):
     from fplbot import cli
 
@@ -3215,7 +3268,7 @@ def _build_client(settings: Settings) -> FplClient:
 
 
 def run(settings: Settings, client: FplClient, scorer, entry_id: int | None = None,
-        now: datetime | None = None) -> dict:
+        now: datetime | None = None, free_transfers: int = 1) -> dict:
     now = now or datetime.now(tz=timezone.utc)
 
     players = client.players()
@@ -3225,8 +3278,13 @@ def run(settings: Settings, client: FplClient, scorer, entry_id: int | None = No
     rules = client.squad_rules()
 
     if isinstance(scorer, NullScorer):
-        items, stats = [], {"comments_fetched": 0, "comments_after_filter": 0,
-                            "sources_used": [], "degraded": True}
+        # Match the shape news.collect() returns, so the report's degradation
+        # logic reads the same keys either way.
+        items, stats = [], {
+            "items_fetched": 0, "items_after_filter": 0,
+            "sources_used": [], "sources_absent": ["news-rss", "reddit"],
+            "reddit_available": False, "reddit_status": "not_configured",
+        }
     else:
         items, stats = collect(settings, now=now)
 
@@ -3253,7 +3311,7 @@ def run(settings: Settings, client: FplClient, scorer, entry_id: int | None = No
             # is worth aborting an otherwise good run for.
             log.warning("could not read entry %s: %s", entry_id, exc)
     return build_report(squad, players, projections, sentiment, stats,
-                        gameweek, current)
+                        gameweek, current, free_transfers=free_transfers)
 
 
 def main(argv=None) -> int:
@@ -3261,6 +3319,9 @@ def main(argv=None) -> int:
     parser.add_argument("--team-id", type=int, default=None,
                         help="public FPL entry id, to show a transfer diff")
     parser.add_argument("--horizon", type=int, default=None)
+    parser.add_argument("--free-transfers", type=int, default=1,
+                        help="free transfers available, banked up to 5. "
+                             "Moves beyond these cost 4 points each")
     parser.add_argument("--output", default="report",
                         help="path prefix; writes .json and .html")
     parser.add_argument("--batch", default=None,
@@ -3282,7 +3343,8 @@ def main(argv=None) -> int:
         log.warning("no scorer configured; producing a stats-only squad")
         scorer = NullScorer()
 
-    report = run(settings, _build_client(settings), scorer, args.team_id)
+    report = run(settings, _build_client(settings), scorer, args.team_id,
+                 free_transfers=args.free_transfers)
 
     out = Path(args.output)
     out.with_suffix(".json").write_text(json.dumps(report, indent=2))
@@ -3291,6 +3353,18 @@ def main(argv=None) -> int:
     print(f"GW{report['gameweek']['id']}: "
           f"{report['projected_total']} projected pts, "
           f"captain {report['captain']['name']}")
+
+    recommended = report.get("transfers_recommended", [])
+    if recommended:
+        print(f"{len(recommended)} transfer(s) worth making:")
+        for move in recommended:
+            cost = "free" if move["uses_free_transfer"] else f"-{move['hit_cost']} pts"
+            print(f"  {move['position']}: {move['out']['name']} out, "
+                  f"{move['in']['name']} in "
+                  f"({move['net_gain']:+.2f} net, {cost})")
+    elif report.get("transfers"):
+        print("No transfer is worth making this week.")
+
     if report["degraded"]:
         print(f"WARNING reduced coverage: {report['degraded_reason']}")
     return 0
