@@ -37,3 +37,9 @@ def test_squad_rejects_wrong_size():
     import pytest
     with pytest.raises(ValueError):
         Squad(players=[], starting_xi=[], captain_id=1, bank=0)
+
+
+def test_squad_rejects_wrong_size_non_empty():
+    import pytest
+    with pytest.raises(ValueError):
+        Squad(players=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], starting_xi=[], captain_id=1, bank=0)
