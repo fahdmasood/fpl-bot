@@ -207,11 +207,23 @@ not `a` (available) has the modifier floor removed — the API's own injury flag
 outranks the internet's opinion.
 
 ### `optimize.py`
-Integer linear program via PuLP, maximising total projected points subject to
-budget, squad size, positional quota, and the 3-per-club limit. Then a second
-smaller ILP picks the best legal XI from the 15 and the captain. An ILP finds
-the true optimum; a greedy pick does not, and the difference is worth real
-points.
+A single integer linear program via PuLP, choosing squad membership and
+starting XI together, subject to budget, squad size, positional quota, the
+3-per-club limit, and XI formation legality. An ILP finds the true optimum; a
+greedy pick does not, and the difference is worth real points.
+
+**Bench points are discounted to 0.1 of a starter's.** A benched FPL player
+scores only if an auto-substitution fires, so an objective that maximises the
+summed points of all fifteen values a bench upgrade as highly as a starter
+upgrade and spends budget accordingly. Measured on real data, solving jointly
+with a discounted bench yields a better starting XI (129.70 against 128.79 for
+the two-stage approach) while keeping the bench playable. A weight of zero
+reaches the same XI total but fills the bench with players on zero minutes and
+no chance of playing — useless when a starter is ruled out before the deadline.
+0.1 captures the gain and avoids that.
+
+`pick_xi` remains available for scoring an XI out of a squad the optimiser did
+not choose, which is what the transfer diff needs.
 
 ### `report.py`
 Renders the squad, the reasoning, the sentiment evidence, and the optional
