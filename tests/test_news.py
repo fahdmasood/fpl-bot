@@ -69,7 +69,7 @@ def test_news_item_has_no_author_field():
 
 def test_collect_without_reddit_reports_it_absent_not_failed(monkeypatch):
     import fplbot.news as news
-    monkeypatch.setattr(news.RssCollector, "collect", lambda self: [item()])
+    monkeypatch.setattr(news.RssCollector, "collect", lambda self: ([item()], set()))
     items, stats = collect(Settings(cache_dir="/tmp/x"), now=NOW)
     assert stats["reddit_available"] is False
     assert "reddit" in stats["sources_absent"]
@@ -86,7 +86,7 @@ def test_a_broken_reddit_is_distinguishable_from_an_absent_one(monkeypatch):
         def subreddit(self, name):
             raise RuntimeError("401 Unauthorized")
 
-    monkeypatch.setattr(news.RssCollector, "collect", lambda self: [item()])
+    monkeypatch.setattr(news.RssCollector, "collect", lambda self: ([item()], set()))
     items, stats = collect(Settings(cache_dir="/tmp/x"), reddit=Boom(), now=NOW)
     assert stats["reddit_available"] is False
     assert stats["reddit_status"].startswith("failed:")
@@ -117,3 +117,48 @@ def test_distinct_stories_sharing_an_opening_are_not_merged():
 
     kept = filter_items([a, b], Settings(cache_dir="/tmp/x"), NOW)
     assert len(kept) == 2, "two different stories were merged as duplicates"
+
+
+class DeadFeed:
+    """What feedparser actually returns for an unreachable or empty feed: it
+    does not raise, it sets bozo and hands back zero entries."""
+
+    bozo = 1
+    entries: list = []
+    bozo_exception = Exception("document declared as us-ascii, but parsed as utf-8")
+
+
+def test_a_total_feed_outage_is_reported_as_an_absent_source(monkeypatch):
+    """feedparser.parse never raises, so the try/except around it could not
+    fire and a complete news blackout was reported as full coverage."""
+    import fplbot.news as news
+
+    monkeypatch.setattr(news.feedparser, "parse", lambda url: DeadFeed())
+    items, stats = collect(Settings(cache_dir="/tmp/x"), now=NOW)
+
+    assert items == []
+    assert "news-rss" in stats["sources_absent"]
+    assert "news-rss" not in stats["sources_used"]
+    assert sorted(stats["feeds_failed"]) == sorted(n for n, _u in FEEDS)
+
+
+def test_a_partial_feed_outage_keeps_the_source_and_names_the_failures(monkeypatch):
+    """One dead feed is not a blackout. The run keeps its coverage and says
+    which feeds went missing."""
+    import time
+    import fplbot.news as news
+
+    class Live:
+        bozo = 0
+        entries = [{"published_parsed": time.gmtime(NOW.timestamp() - 3600),
+                    "link": "u", "title": "t", "summary": "Saka trained fully"}]
+
+    monkeypatch.setattr(
+        news.feedparser, "parse",
+        lambda url: DeadFeed() if "bbci" in url else Live())
+    items, stats = collect(Settings(cache_dir="/tmp/x"), now=NOW)
+
+    assert items, "a live feed must still deliver items"
+    assert "news-rss" in stats["sources_used"]
+    assert "news-rss" not in stats["sources_absent"]
+    assert stats["feeds_failed"] == ["bbc"]

@@ -118,6 +118,15 @@ def _degradation_notes(stats: dict) -> list[str]:
             "this run."
         )
 
+    # A partial outage keeps news-rss in sources_used, so it would otherwise
+    # pass as full coverage. Name the feeds that went missing.
+    failed_feeds = stats.get("feeds_failed") or []
+    if failed_feeds and "news-rss" not in absent:
+        notes.append(
+            f"Some news feeds could not be read this run "
+            f"({', '.join(failed_feeds)}), so coverage is thinner than usual."
+        )
+
     status = stats.get("reddit_status", "not_configured")
     if isinstance(status, str) and status.startswith("failed:"):
         notes.append(

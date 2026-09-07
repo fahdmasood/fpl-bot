@@ -48,7 +48,7 @@ def test_build_report_consumes_the_stats_news_collect_actually_returns(client, m
     sample = NewsItem(source="bbc", url="u",
                       published_at=datetime(2026, 9, 7, 11, tzinfo=timezone.utc),
                       title="t", body="Saka trained fully today", score=10)
-    monkeypatch.setattr(news.RssCollector, "collect", lambda self: [sample])
+    monkeypatch.setattr(news.RssCollector, "collect", lambda self: ([sample], set()))
     _items, stats = news.collect(Settings(cache_dir="/tmp/x"),
                                  now=datetime(2026, 9, 7, 12, tzinfo=timezone.utc))
 
@@ -231,3 +231,30 @@ def test_an_unaffordable_move_does_not_burn_a_free_transfer():
     assert planned[1]["uses_free_transfer"] is True
     assert planned[1]["hit_cost"] == 0
     assert planned[1]["recommended"] is True
+
+
+def test_a_total_news_outage_is_reported_as_an_outage_not_as_filtering(client, monkeypatch):
+    """With every feed dead the run must say the feeds could not be read.
+    Blaming the filters would send someone tuning thresholds that are fine."""
+    import fplbot.news as news
+    from tests.test_news import DeadFeed
+
+    monkeypatch.setattr(news.feedparser, "parse", lambda url: DeadFeed())
+    _items, stats = news.collect(Settings(cache_dir="/tmp/x"))
+
+    report, *_ = _report(client, stats=stats)
+    assert report["degraded"] is True
+    reason = report["degraded_reason"].lower()
+    assert "news feeds could not be read" in reason
+    assert "survived filtering" not in reason
+
+
+def test_a_partial_news_outage_names_the_failed_feeds(client):
+    stats = {"collection_attempted": True, "items_fetched": 20,
+             "items_after_filter": 18, "sources_used": ["news-rss"],
+             "sources_absent": ["reddit"], "reddit_available": False,
+             "reddit_status": "not_configured", "feeds_failed": ["bbc", "sky"]}
+    report, *_ = _report(client, stats=stats)
+    assert report["degraded"] is True
+    assert "bbc" in report["degraded_reason"]
+    assert "sky" in report["degraded_reason"]

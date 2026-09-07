@@ -79,15 +79,35 @@ class RssCollector:
         self.feeds = feeds
         self.default_score = default_score
 
-    def collect(self) -> list[NewsItem]:
+    def collect(self) -> tuple[list[NewsItem], set[str]]:
+        """Return the items collected and the names of the feeds that failed.
+
+        feedparser.parse does not raise on a dead feed. It sets `bozo` and
+        hands back zero entries, so wrapping it in a try/except detects
+        nothing: a total blackout used to be indistinguishable from a quiet
+        news day. A feed that yields no entries is treated as failed, which
+        is the only signal available and the honest reading of it.
+        """
         items: list[NewsItem] = []
+        failed: set[str] = set()
         for name, url in self.feeds:
             try:
                 parsed = feedparser.parse(url)
             except Exception as exc:
                 log.warning("feed %s failed: %s", name, exc)
+                failed.add(name)
                 continue
-            for entry in parsed.entries:
+            entries = list(getattr(parsed, "entries", []) or [])
+            if not entries:
+                log.warning("feed %s returned no entries (bozo=%s)",
+                            name, getattr(parsed, "bozo", 0))
+                failed.add(name)
+                continue
+            if getattr(parsed, "bozo", 0):
+                # Malformed but readable. Worth a line in the log, not a
+                # reason to throw away entries we did parse.
+                log.info("feed %s parsed with warnings", name)
+            for entry in entries:
                 published = entry.get("published_parsed") or entry.get("updated_parsed")
                 if not published:
                     continue
@@ -102,7 +122,7 @@ class RssCollector:
                         score=self.default_score,
                     )
                 )
-        return items
+        return items, failed
 
 
 class RedditCollector:
@@ -171,11 +191,22 @@ def collect(settings: Settings, reddit=None, now: datetime | None = None):
     sources_used: list[str] = []
     sources_absent: list[str] = []
 
+    collector = RssCollector()
+    feeds_failed: list[str] = []
     try:
-        raw += RssCollector().collect()
-        sources_used.append("news-rss")
+        news_items, failed = collector.collect()
+        feeds_failed = sorted(failed)
+        # One dead feed is thinner coverage, not a blackout. Only a total
+        # outage makes the source absent; anything short of that is reported
+        # through feeds_failed so the run says which ones went missing.
+        if failed and len(failed) == len(collector.feeds):
+            sources_absent.append("news-rss")
+        else:
+            raw += news_items
+            sources_used.append("news-rss")
     except Exception as exc:
         log.warning("news feeds failed: %s", exc)
+        feeds_failed = [name for name, _url in collector.feeds]
         sources_absent.append("news-rss")
 
     have_credentials = bool(settings.reddit_client_id and settings.reddit_client_secret)
@@ -207,6 +238,7 @@ def collect(settings: Settings, reddit=None, now: datetime | None = None):
         "items_after_filter": len(kept),
         "sources_used": sources_used,
         "sources_absent": sources_absent,
+        "feeds_failed": feeds_failed,
         "reddit_available": reddit_available,
         "reddit_status": reddit_status,
     }
