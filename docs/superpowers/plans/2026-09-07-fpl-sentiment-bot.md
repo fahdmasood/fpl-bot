@@ -18,11 +18,11 @@ Every task's requirements implicitly include this section.
 
 - **Python >= 3.13.** Available at `~/.pyenv/shims/python3` (3.13.5).
 - **No FPL account credentials anywhere in this system.** The bot reads public endpoints only and never writes to a user's team.
-- **Horizon default 3 gameweeks, `decay_base = 0.84`** — weights 1.00 / 0.84 / 0.71.
+- **Horizon default 3 gameweeks, `decay_base = 0.84`**, weights 1.00 / 0.84 / 0.71.
 - **Sentiment modifier capped at ±15%, applied to the GW+1 term only**, never to GW+2 or GW+3, and never directly to a points total.
 - **Item collection: 600 per run, hard ceiling 1000**, score floor >= 3, age <= 36h, deduplicated on normalised text. Reddit, when enabled, draws from at most 8 threads.
 - **News RSS is the primary sentiment source; Reddit is optional and gated on approved Data API access.** A run without Reddit is the expected default, not a degraded state.
-- **Never store a comment author.** `NewsItem` has no `author` field and must not gain one — Reddit policy forbids inferring characteristics about users.
+- **Never store a comment author.** `NewsItem` has no `author` field and must not gain one, Reddit policy forbids inferring characteristics about users.
 - **Reddit User-Agent must be exactly** `python:fpl-bot:v1.0.0 (by /u/<username>)`. Generic UAs are heavily throttled by Reddit.
 - **One Reddit client id.** Registering multiple accounts or apps for the same use case violates Reddit's Responsible Builder Policy and risks a permanent block.
 - **Sentiment model:** `claude-haiku-4-5`.
@@ -62,7 +62,7 @@ Every task's requirements implicitly include this section.
 - Consumes: nothing (first task)
 - Produces: `Settings` dataclass with fields `cache_dir: Path`, `horizon: int = 3`, `decay_base: float = 0.84`, `sentiment_cap: float = 0.15`, `comment_cap: int = 600`, `comment_ceiling: int = 1000`, `max_threads: int = 8`, `score_floor: int = 3`, `max_age_hours: int = 36`, `reddit_client_id: str | None`, `reddit_client_secret: str | None`, `reddit_username: str | None`, `anthropic_api_key: str | None`; classmethod `Settings.from_env() -> Settings`; module constant `SCORING: dict`; function `user_agent(username: str) -> str`.
 
-**Background the implementer needs:** FPL awards points by position. The API does *not* expose the points values, so they live in a hardcoded `SCORING` table. A wrong value here silently corrupts every projection downstream, so it is worth checking against the official rules at `fantasy.premierleague.com/help/rules` before trusting it. Note that `defensive_contribution` is a scoring category in the current season — defenders earn points above a clearances/blocks/interceptions threshold, midfielders and forwards on a combined tackles-and-recoveries measure.
+**Background the implementer needs:** FPL awards points by position. The API does *not* expose the points values, so they live in a hardcoded `SCORING` table. A wrong value here silently corrupts every projection downstream, so it is worth checking against the official rules at `fantasy.premierleague.com/help/rules` before trusting it. Note that `defensive_contribution` is a scoring category in the current season, defenders earn points above a clearances/blocks/interceptions threshold, midfielders and forwards on a combined tackles-and-recoveries measure.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -255,7 +255,7 @@ git commit -m "feat: project scaffold, settings, and FPL scoring table"
 - Consumes: `POSITION_BY_ELEMENT_TYPE` from `fplbot.config`
 - Produces: frozen dataclasses `Team`, `Player`, `Fixture`, `Gameweek`, `NewsItem`, `Mention`, `MentionScore`, `PlayerSentiment`, `Projection`, `Squad`, plus `Player.from_api(raw: dict) -> Player` and `Player.price_m -> float`.
 
-**Background the implementer needs:** `now_cost` is an integer in tenths of a million; keep it an integer everywhere and only convert for display. `status` is a single character: `a` available, `d` doubtful, `i` injured, `s` suspended, `u` unavailable, `n` on loan / not in squad. `chance_of_playing_next_round` is an integer percentage or `None` — and `None` means "no news", which is good news, not missing data. Getting that backwards benches every fit player.
+**Background the implementer needs:** `now_cost` is an integer in tenths of a million; keep it an integer everywhere and only convert for display. `status` is a single character: `a` available, `d` doubtful, `i` injured, `s` suspended, `u` unavailable, `n` on loan / not in squad. `chance_of_playing_next_round` is an integer percentage or `None`, and `None` means "no news", which is good news, not missing data. Getting that backwards benches every fit player.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -492,7 +492,7 @@ git commit -m "feat: domain models with availability semantics"
 - Consumes: `Settings` from `fplbot.config`; `Player`, `Team`, `Fixture`, `Gameweek` from `fplbot.models`
 - Produces: `FplClient(settings, session=None)` with methods `bootstrap() -> dict`, `fixtures(event: int | None = None) -> list[Fixture]`, `players() -> list[Player]`, `teams() -> list[Team]`, `gameweeks() -> list[Gameweek]`, `next_gameweek() -> Gameweek`, `entry_picks(entry_id: int, event: int) -> list[int]`, `squad_rules() -> dict`. Also `cache_age_seconds(key: str) -> float | None`.
 
-**Background the implementer needs:** The base URL is `https://fantasy.premierleague.com/api/`. No authentication. All four endpoints used here are public; `entry_picks` reads another manager's public team and needs no login. Requests without a browser-like `User-Agent` are sometimes rejected, so set one. A stale cache is explicitly preferred over a failed run — if the network is down at 11:00 on a Friday, a slightly old projection is far more useful than a traceback.
+**Background the implementer needs:** The base URL is `https://fantasy.premierleague.com/api/`. No authentication. All four endpoints used here are public; `entry_picks` reads another manager's public team and needs no login. Requests without a browser-like `User-Agent` are sometimes rejected, so set one. A stale cache is explicitly preferred over a failed run, if the network is down at 11:00 on a Friday, a slightly old projection is far more useful than a traceback.
 
 `squad_rules()` extracts constraints from the live API rather than hardcoding them: `game_settings.squad_total_spend`, `squad_squadsize`, `squad_squadplay`, `squad_team_limit`, and each `element_types` entry's `squad_min_play` / `squad_max_play`.
 
@@ -813,7 +813,7 @@ all scaled by the probability the player is on the pitch. Per-90 rates come from
 Two constraints from the spec that are easy to violate:
 
 1. **Sentiment applies to the GW+1 term only.** With horizon 3 and decay 0.84, GW+1 holds about 39% of the objective. Applying the ±15% modifier across all three weeks would dilute the guardrail to roughly ±6%, which is not what the spec intends.
-2. **Freeze lag features at the deadline.** When projecting GW+2 and GW+3, the model may not use anything that happens in GW+1 — those results do not exist yet at decision time. Every gameweek in the horizon reuses the same player-form inputs. Violating this makes a backtest look excellent and the live bot perform badly.
+2. **Freeze lag features at the deadline.** When projecting GW+2 and GW+3, the model may not use anything that happens in GW+1, those results do not exist yet at decision time. Every gameweek in the horizon reuses the same player-form inputs. Violating this makes a backtest look excellent and the live bot perform badly.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1129,7 +1129,7 @@ def team_xgc_per_90(players: list[Player]) -> dict[int, float]:
 
     Taken from the club's most-played goalkeeper: they are on the pitch for
     every goal conceded, so their expected_goals_conceded IS the club's. This
-    is what the spec means by "the club's expected_goals_conceded" — using a
+    is what the spec means by "the club's expected_goals_conceded", using a
     fixture-difficulty digit alone cannot tell a good defence from a bad one.
     """
     raw: dict[int, tuple[float, float]] = {}  # team_id -> (rate, matches)
@@ -1183,7 +1183,7 @@ def poisson_at_least(threshold: int, mean: float) -> float:
     """P(X >= threshold) for X ~ Poisson(mean).
 
     Defensive contributions are counts, and the 2 points are awarded per match
-    for clearing a threshold — so what matters is the PROBABILITY of clearing
+    for clearing a threshold, so what matters is the PROBABILITY of clearing
     it, not the ratio of the average to it. A player averaging 11.67 actions
     against a threshold of 12 clears it roughly half the time; treating
     11.67/12 as a 97% share credits him nearly full points every match.
@@ -1259,7 +1259,7 @@ def expected_points_one_gw(
     else:
         dc = 0.0
 
-    # The form channel moves attacking output and bonus — the parts of a
+    # The form channel moves attacking output and bonus, the parts of a
     # projection that genuine form talk is about. It does not touch clean
     # sheets or appearance, which are team and selection properties.
     scored = ((attacking + bonus_estimate(player, med["bps"])) * form_multiplier
@@ -1357,7 +1357,7 @@ git commit -m "feat: expected-points model with capped GW+1 sentiment modifier"
 Two things that bite:
 
 - **Keep money in integers.** `now_cost` is tenths of a million and the budget is 1000. Introducing floats here produces infeasibility at the last tenth for no visible reason.
-- **Solve the XI separately.** The 15-man squad and the starting XI have different constraints — the squad quota is 2/5/5/3, while the XI needs 1 GKP and a legal outfield formation. Solving them as one program is possible but harder to read and debug; two small programs are clearer.
+- **Solve the XI separately.** The 15-man squad and the starting XI have different constraints, the squad quota is 2/5/5/3, while the XI needs 1 GKP and a legal outfield formation. Solving them as one program is possible but harder to read and debug; two small programs are clearer.
 
 When the model is infeasible, report which constraint bound rather than returning a partial squad. An infeasible FPL squad almost always means the projections are broken (for example every player projecting zero), not that the constraints are wrong.
 
@@ -1446,7 +1446,7 @@ def test_optimum_beats_a_naive_greedy_pick(setup):
     The greedy walk reserves enough budget to fill its remaining slots at the
     cheapest available price, so it always completes a legal 15. An earlier
     version of this test let greedy stall at 13 players and then skipped its
-    only assertion — it passed while proving nothing.
+    only assertion, it passed while proving nothing.
     """
     players, projections, rules = setup
     squad = pick_squad(players, projections, rules)
@@ -1658,15 +1658,15 @@ git commit -m "feat: ILP squad and XI selection"
 - Consumes: `Settings` from `fplbot.config`; `NewsItem` from `fplbot.models`
 - Produces: `collect(settings, reddit=None, now=None) -> tuple[list[NewsItem], dict]` returning items and a stats dict with keys `items_fetched`, `items_after_filter`, `sources_used`, `sources_absent`, `reddit_available`, `reddit_status`; `filter_items(items, settings, now) -> list[NewsItem]`; `normalise(text) -> str`; module constants `FEEDS`, `SOURCE_TRUST`; classes `RssCollector`, `RedditCollector`
 
-**Background the implementer needs:** The signal worth having is early availability news — injuries, knocks, rotation hints — reaching us before the statistics absorb it. Six news feeds are the primary source, all verified returning items on 2026-09-07. ESPN's soccer feed returns an empty document and Football365's 404s; both are deliberately excluded, so do not add them back.
+**Background the implementer needs:** The signal worth having is early availability news, injuries, knocks, rotation hints, reaching us before the statistics absorb it. Six news feeds are the primary source, all verified returning items on 2026-09-07. ESPN's soccer feed returns an empty document and Football365's 404s; both are deliberately excluded, so do not add them back.
 
 Sources carry a **trust tier**, exported as `SOURCE_TRUST`, which Task 7 uses to weight a mention's confidence. BBC, Guardian and Sky are 1.0; talkSPORT, Metro and Mirror are 0.6. The tabloids break real team news often enough to be worth reading and speculate often enough to be worth discounting.
 
-**Reddit is optional and gated on approval.** Reddit's Responsible Builder Policy requires explicit approved access before using their Data API; creating a script app is not sufficient. So `RedditCollector` runs only when credentials are present, and its absence is a normal state reported in `sources_absent` — not an error and not a fallback. Do not add an unauthenticated Reddit RSS path: a run either has approved API access or reports Reddit as absent.
+**Reddit is optional and gated on approval.** Reddit's Responsible Builder Policy requires explicit approved access before using their Data API; creating a script app is not sufficient. So `RedditCollector` runs only when credentials are present, and its absence is a normal state reported in `sources_absent`, not an error and not a fallback. Do not add an unauthenticated Reddit RSS path: a run either has approved API access or reports Reddit as absent.
 
-Two policy constraints bind this file: never store a comment author (`NewsItem` has no `author` field — do not add one), and never retain collected text beyond the run.
+Two policy constraints bind this file: never store a comment author (`NewsItem` has no `author` field, do not add one), and never retain collected text beyond the run.
 
-Reddit rate limits are not a real constraint (100 QPM per client, ~15-25 calls per run) so do not build throttling. `/comments/{id}` is not a listing and has no `after` cursor — use `sort="new"` plus a bounded `replace_more`.
+Reddit rate limits are not a real constraint (100 QPM per client, ~15-25 calls per run) so do not build throttling. `/comments/{id}` is not a listing and has no `after` cursor, use `sort="new"` plus a bounded `replace_more`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2039,9 +2039,9 @@ git commit -m "feat: news-first collection with trust tiers and optional Reddit"
 - Consumes: `Player`, `NewsItem`, `Mention`, `MentionScore`, `PlayerSentiment` from `fplbot.models`; `Settings` from `fplbot.config`; `SOURCE_TRUST` from `fplbot.news`
 - Produces: `resolve_mentions(items, players) -> list[Mention]`; `Scorer` protocol with `score(mentions) -> dict[int, MentionScore]` keyed by index into `mentions`; `NullScorer`, `ApiScorer(api_key, model="claude-haiku-4-5")`, `SessionScorer(batch_path, scores_path)`; `aggregate(mentions, scores: dict[int, MentionScore], now, half_life_days=7) -> dict[int, PlayerSentiment]`
 
-**Background the implementer needs:** Resolution is deterministic string matching, not a model call. Match on `web_name` and on surname, case-insensitively, at word boundaries. Ambiguity is real and common — several Premier League squads contain players who share a surname — so when a surname matches more than one player, resolve using club context in the same text and **drop the mention if that fails**. A wrongly attributed injury rumour is worse than a missing one.
+**Background the implementer needs:** Resolution is deterministic string matching, not a model call. Match on `web_name` and on surname, case-insensitively, at word boundaries. Ambiguity is real and common, several Premier League squads contain players who share a surname, so when a surname matches more than one player, resolve using club context in the same text and **drop the mention if that fails**. A wrongly attributed injury rumour is worse than a missing one.
 
-Aggregation collapses many mentions into two signals per player. `injury` and `rotation` categories feed `availability_signal`; `form` and `hype` feed `form_signal`. Weight each mention by its confidence and by recency, using a 7-day half-life: `weight = confidence * 0.5 ** (age_days / 7)`. Mention volume is recorded but never fed into the model — it measures how popular a player is, not how good, and letting it into the projection would systematically favour already-owned players.
+Aggregation collapses many mentions into two signals per player. `injury` and `rotation` categories feed `availability_signal`; `form` and `hype` feed `form_signal`. Weight each mention by its confidence and by recency, using a 7-day half-life: `weight = confidence * 0.5 ** (age_days / 7)`. Mention volume is recorded but never fed into the model, it measures how popular a player is, not how good, and letting it into the projection would systematically favour already-owned players.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2503,7 +2503,7 @@ git commit -m "feat: mention resolution, scorer implementations, and aggregation
 
 **Background the implementer needs:** The JSON is the source of truth and the HTML is a view of it. Keep every number in the JSON so a later change of reporting destination needs no new computation.
 
-The report must state its own degradation. If the run had no comment-level Reddit access, or used a stale cache, that belongs at the top of the report where it cannot be missed — a confident-looking squad built on a degraded run is the failure mode worth guarding against.
+The report must state its own degradation. If the run had no comment-level Reddit access, or used a stale cache, that belongs at the top of the report where it cannot be missed, a confident-looking squad built on a degraded run is the failure mode worth guarding against.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2685,7 +2685,7 @@ def render_html(report: dict) -> str:
     )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<title>FPL squad — {esc(report['gameweek']['name'])}</title>
+<title>FPL squad, {esc(report['gameweek']['name'])}</title>
 <style>
 body {{ font: 15px system-ui, sans-serif; margin: 2rem auto; max-width: 46rem; }}
 .warn {{ background: #fde68a; padding: .75rem; border-radius: .375rem; }}
@@ -2725,7 +2725,7 @@ git commit -m "feat: JSON and HTML reporting with transfer diff"
 - Consumes: every module above
 - Produces: `main(argv=None) -> int`; `run(settings, client, scorer, entry_id=None, now=None) -> dict`
 
-**Background the implementer needs:** The CLI wires the pipeline and chooses a scorer: `SessionScorer` when `--batch` is given, `ApiScorer` when `ANTHROPIC_API_KEY` is set, otherwise `NullScorer`. Choosing `NullScorer` silently is correct behaviour — a stats-only squad is still useful — but the report must say so, which it does via the degraded banner.
+**Background the implementer needs:** The CLI wires the pipeline and chooses a scorer: `SessionScorer` when `--batch` is given, `ApiScorer` when `ANTHROPIC_API_KEY` is set, otherwise `NullScorer`. Choosing `NullScorer` silently is correct behaviour, a stats-only squad is still useful, but the report must say so, which it does via the degraded banner.
 
 The end-to-end test is the one that catches integration mistakes the unit tests cannot: type mismatches between modules, and the lag-freezing requirement from the spec.
 
@@ -2803,7 +2803,7 @@ def test_cli_writes_json_and_html(client, tmp_path, monkeypatch):
     assert (tmp_path / "report.html").exists()
 ```
 
-Note on the third test: `copy.replace` requires Python 3.13, which this project already mandates. If `project_all` currently reads `form` for later gameweeks, this test will fail — that is the point. Fix it by computing form-derived inputs once, before the horizon loop, rather than per gameweek.
+Note on the third test: `copy.replace` requires Python 3.13, which this project already mandates. If `project_all` currently reads `form` for later gameweeks, this test will fail, that is the point. Fix it by computing form-derived inputs once, before the horizon loop, rather than per gameweek.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -2936,7 +2936,7 @@ Expected: all tests pass across every module
 python3 -m fplbot.cli --output /tmp/fpl-report -v
 ```
 
-Expected: prints a gameweek line and a reduced-coverage warning (no Reddit credentials yet), and writes `/tmp/fpl-report.json` and `.html`. Open the HTML and sanity-check the squad against your own football judgement — an optimizer producing a squad full of players you have never heard of usually means the projection is rewarding a stat it should not.
+Expected: prints a gameweek line and a reduced-coverage warning (no Reddit credentials yet), and writes `/tmp/fpl-report.json` and `.html`. Open the HTML and sanity-check the squad against your own football judgement, an optimizer producing a squad full of players you have never heard of usually means the projection is rewarding a stat it should not.
 
 - [ ] **Step 6: Write `README.md`**
 
@@ -2966,8 +2966,8 @@ post titles only and marks its report as reduced coverage.
 
 ## Design
 
-- `docs/superpowers/specs/` — the design and why each parameter is what it is
-- `docs/research/` — the sourced research behind the horizon and comment cap
+- `docs/superpowers/specs/`, the design and why each parameter is what it is
+- `docs/research/`, the sourced research behind the horizon and comment cap
 EOF
 ```
 
@@ -2989,7 +2989,7 @@ git commit -m "feat: CLI and end-to-end pipeline"
 - Consumes: the `fplbot` CLI from Task 9
 - Produces: documentation only; no code
 
-**Background the implementer needs:** The spec calls for two runs per gameweek, at T-48h and T-3h relative to `deadline_time`. Deadlines move week to week, so a fixed weekly cron is wrong — the schedule must be derived from the API.
+**Background the implementer needs:** The spec calls for two runs per gameweek, at T-48h and T-3h relative to `deadline_time`. Deadlines move week to week, so a fixed weekly cron is wrong, the schedule must be derived from the API.
 
 - [ ] **Step 1: Verify the deadline query works**
 
@@ -3012,8 +3012,8 @@ cat > docs/scheduling.md <<'EOF'
 
 Two runs per gameweek, both derived from the API's `deadline_time`:
 
-- **T-48h** — early look, while prices are still moving.
-- **T-3h** — the run that matters, after Friday press conferences.
+- **T-48h**, early look, while prices are still moving.
+- **T-3h**, the run that matters, after Friday press conferences.
 
 Deadlines shift week to week, so do not use a fixed weekly cron. Query the
 next deadline and schedule against it:

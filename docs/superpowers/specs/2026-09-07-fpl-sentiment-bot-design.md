@@ -1,4 +1,4 @@
-# FPL Sentiment Bot — Design
+# FPL Sentiment Bot, Design
 
 **Date:** 2026-09-07
 **Status:** Approved for planning
@@ -14,7 +14,7 @@ for it, and makes no transfers.
 
 ## Success criteria
 
-1. A run produces a legal 15-man squad — with a starting XI and a captain —
+1. A run produces a legal 15-man squad, with a starting XI and a captain,
    satisfying the constraints *as read from the API*
    (`game_settings.squad_total_spend`, `squad_squadsize`, `squad_team_limit`,
    and `element_types[].squad_min_play`/`squad_max_play`), not hardcoded. At
@@ -41,7 +41,7 @@ for it, and makes no transfers.
 
 All verified reachable on 2026-09-07.
 
-### FPL API — unauthenticated, the quantitative backbone
+### FPL API, unauthenticated, the quantitative backbone
 
 | Endpoint | Gives us |
 |---|---|
@@ -56,8 +56,8 @@ hardcoded. At time of writing the next deadline is GW4,
 
 ### Sentiment sources
 
-The signal worth having is **early availability news** — injuries, knocks,
-rotation hints from press conferences — reaching us before the statistical feed
+The signal worth having is **early availability news**, injuries, knocks,
+rotation hints from press conferences, reaching us before the statistical feed
 absorbs it. Community chatter adds volume around that signal; it rarely adds
 signal of its own.
 
@@ -97,7 +97,7 @@ Two policy constraints bind the design regardless of approval:
   time and never retain a corpus for training. Nothing in this system fine-tunes
   on collected text, and nothing should be added that does.
 - **No inferring characteristics about Redditors.** Sentiment is attributed to
-  *footballers*, never to the commenter. The pipeline stores no author field —
+  *footballers*, never to the commenter. The pipeline stores no author field,
   `NewsItem` deliberately has no `author`, and none should be added.
 
 `reddit.com/r/.../hot.json` returns 403 to non-browser clients and
@@ -140,29 +140,29 @@ reproducible and tests never hit the network. One retry with backoff; a stale
 cache is preferred over a failed run.
 
 ### `news.py`
-Collects raw text items — posts and comments — into a common shape:
+Collects raw text items, posts and comments, into a common shape:
 `{source, url, published_at, title, body, score}`. Applies the thread, score,
 dedupe, and volume-cap filters described above. Knows nothing about players.
 
 ### `sentiment.py`
 Resolves player mentions and scores them. Two stages:
 
-1. **Mention resolution** — deterministic string matching of items against the
+1. **Mention resolution**, deterministic string matching of items against the
    player list from `bootstrap-static`, handling web names, surnames, and a
    hand-maintained alias table for the ambiguous cases. Ambiguity is resolved
    by club context in the same text; unresolvable mentions are dropped, not
    guessed.
-2. **Scoring** — resolved mentions batched to Claude Haiku 4.5, returning per
+2. **Scoring**, resolved mentions batched to Claude Haiku 4.5, returning per
    mention `{player_id, sentiment: -1..1, category, confidence: 0..1}` where
    category is one of `injury`, `rotation`, `form`, `hype`.
 
 Scoring sits behind a `Scorer` interface with two implementations, so the
 package does not care who is running it:
 
-- `ApiScorer` — calls the Anthropic API directly using `ANTHROPIC_API_KEY`.
+- `ApiScorer`, calls the Anthropic API directly using `ANTHROPIC_API_KEY`.
   Used when the CLI runs standalone, and the path a future GitHub Actions
   deployment would take.
-- `SessionScorer` — writes the batch to a file and reads scores back, letting
+- `SessionScorer`, writes the batch to a file and reads scores back, letting
   the scheduled Claude routine do the scoring inside its own session with no
   API key involved. This is the default for the scheduled runs.
 
@@ -176,7 +176,7 @@ sentence in the corpus. Keyword scoring cannot do this.
 
 Per player the mentions collapse into a confidence-weighted mean, with recency
 decay over a 7-day half-life, plus mention volume as a separate field. Volume
-is reported but never fed to the model — it measures popularity, not quality.
+is reported but never fed to the model, it measures popularity, not quality.
 
 ### `projection.py`
 Expected points per player over the next N gameweeks (default 3, decayed; see
@@ -196,14 +196,14 @@ Resolved parameters):
 - **Bonus** estimated from ICT and historical BPS rate.
 
 Sentiment enters as a **bounded modifier**, capped at ±15%, applied to minutes
-probability and to form — never directly to the points total.
+probability and to form, never directly to the points total.
 
 This cap is the most important guardrail in the design. Community sentiment is
 loud, herd-driven, and frequently wrong; its genuine edge is early injury and
 rotation news that the statistical feed has not yet absorbed. The cap lets it
 express exactly that and nothing more. `injury` and `rotation` categories move
 minutes probability; `form` and `hype` move form. Any player whose `status` is
-not `a` (available) has the modifier floor removed — the API's own injury flag
+not `a` (available) has the modifier floor removed, the API's own injury flag
 outranks the internet's opinion.
 
 ### `optimize.py`
@@ -219,7 +219,7 @@ upgrade and spends budget accordingly. Measured on real data, solving jointly
 with a discounted bench yields a better starting XI (129.70 against 128.79 for
 the two-stage approach) while keeping the bench playable. A weight of zero
 reaches the same XI total but fills the bench with players on zero minutes and
-no chance of playing — useless when a starter is ruled out before the deadline.
+no chance of playing, useless when a starter is ruled out before the deadline.
 0.1 captures the gain and avoids that.
 
 `pick_xi` remains available for scoring an XI out of a squad the optimiser did
@@ -237,8 +237,8 @@ hidden state.
 
 Two runs per gameweek, both derived from `deadline_time`:
 
-- **T-48h** — early look while prices are still moving.
-- **T-3h** — the call that matters, after Friday press conferences.
+- **T-48h**, early look while prices are still moving.
+- **T-3h**, the call that matters, after Friday press conferences.
 
 The schedule is driven by a Claude routine that invokes the CLI, reads the
 JSON, and publishes an Artifact page that updates in place at one stable URL.
@@ -264,7 +264,7 @@ answer.
 ## Testing
 
 - Cached API snapshots as fixtures. The projection and optimizer are pure
-  functions over them — deterministic, offline, fast.
+  functions over them, deterministic, offline, fast.
 - Optimizer tests assert the hard constraints hold on the output: budget,
   squad shape, club limit, XI legality.
 - A property test that raising a player's sentiment never lowers their
@@ -302,25 +302,25 @@ Settled by research against public FPL repos and Reddit's own API docs; see
 but they optimise a *sequence of transfers with banked free transfers*; this
 design makes a single-period squad pick, so their number would arrive without
 the machinery that justifies it. No public backtest compares horizons head to
-head — these are conventions, not measured optima, and ours should be revisited
+head, these are conventions, not measured optima, and ours should be revisited
 against real results.
 
 **The sentiment modifier applies to the GW+1 term only.** Availability
 forecasting degrades sharply with horizon while attacking-return forecasting
 does not, and sentiment here is an availability signal. Spreading ±15% evenly
 across three decayed weeks would leave GW+1 holding ~39% of the objective, so
-the guardrail would move the total by only ~6% — far weaker than intended.
+the guardrail would move the total by only ~6%, far weaker than intended.
 
 **Comment collection: 600 per run** (hard ceiling 1,000), from at most 8
 threads, score floor >= 3, age <= 36h, deduplicated on normalised text. At
-Haiku 4.5 rates this is ~$0.20/run, ~$15/season across two runs per gameweek —
+Haiku 4.5 rates this is ~$0.20/run, ~$15/season across two runs per gameweek,
 so cost is not the binding constraint; signal quality is. Instrument
 `comments_fetched`, `comments_after_filter`, `mentions_resolved`, and
 `unique_players_touched` per run, and move the cap to where
 `unique_players_touched` plateaus.
 
 Exclude per-match live and bonus threads. They generate the most comments and
-the least decision-relevant text — the fastest way to burn the cap on noise.
+the least decision-relevant text, the fastest way to burn the cap on noise.
 Target the daily megathread, the current "How Did ____ Play?" thread, and
 listing posts above the score floor.
 
@@ -328,12 +328,12 @@ listing posts above the score floor.
 
 - **Rate limiting is not a real constraint here.** Reddit allows 100 queries
   per minute per OAuth client, averaged over a 10-minute window; a run costs
-  ~15-25 calls. Do not build elaborate throttling — read `x-ratelimit-remaining`
+  ~15-25 calls. Do not build elaborate throttling, read `x-ratelimit-remaining`
   off live responses (it is a *float*) and back off if it drops, rather than
   hardcoding a limit against a window Reddit describes as "currently" 10 minutes.
 - **`/comments/{article}` is not a listing and has no `after`/`before` cursor.**
   "Newest first, capped" must be implemented with `sort=new`, `depth`, and
-  selective `/api/morechildren` expansion — not a `limit`/`after` loop. Reddit
+  selective `/api/morechildren` expansion, not a `limit`/`after` loop. Reddit
   documents no maximum `limit` on this endpoint; verify empirically.
 - **User-Agent format is mandated**: `python:fpl-bot:v1.0.0 (by /u/<username>)`.
   Generic UAs are heavily throttled.

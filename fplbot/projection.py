@@ -72,7 +72,7 @@ def team_xgc_per_90(players: list[Player]) -> dict[int, float]:
 
     Taken from the club's most-played goalkeeper: they are on the pitch for
     every goal conceded, so their expected_goals_conceded IS the club's. This
-    is what the spec means by "the club's expected_goals_conceded" — using a
+    is what the spec means by "the club's expected_goals_conceded", using a
     fixture-difficulty digit alone cannot tell a good defence from a bad one.
     """
     raw: dict[int, tuple[float, float]] = {}  # team_id -> (rate, matches)
@@ -138,7 +138,7 @@ def poisson_at_least(threshold: int, mean: float) -> float:
     """P(X >= threshold) for X ~ Poisson(mean).
 
     Defensive contributions are counts, and the 2 points are awarded per match
-    for clearing a threshold — so what matters is the PROBABILITY of clearing
+    for clearing a threshold, so what matters is the PROBABILITY of clearing
     it, not the ratio of the average to it. A player averaging 11.67 actions
     against a threshold of 12 clears it roughly half the time; treating
     11.67/12 as a 97% share credits him nearly full points every match.
@@ -202,7 +202,7 @@ def expected_points_one_gw(
     else:
         dc = 0.0
 
-    # The form channel moves attacking output and bonus — the parts of a
+    # The form channel moves attacking output and bonus, the parts of a
     # projection that genuine form talk is about. It does not touch clean
     # sheets or appearance, which are team and selection properties.
     scored = ((attacking + bonus_estimate(player, med["bps"])) * form_multiplier

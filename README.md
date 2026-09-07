@@ -28,7 +28,7 @@ If Reddit access is enabled:
 - No comment author is ever stored. `NewsItem` has no `author` field, by design.
 - No characteristics are inferred about any Reddit user. Sentiment is attributed
   to **footballers**, never to the person writing about them.
-- Nothing is retained beyond the run, and nothing trains any model — text is
+- Nothing is retained beyond the run, and nothing trains any model, text is
   scored at inference time and discarded.
 - Roughly 15-25 API calls per run, twice per gameweek.
 
@@ -57,5 +57,5 @@ network.
 
 ## Design
 
-- `docs/superpowers/specs/` — the design, and why each parameter is what it is
-- `docs/research/` — sourced research behind the projection horizon and caps
+- `docs/superpowers/specs/`, the design, and why each parameter is what it is
+- `docs/research/`, sourced research behind the projection horizon and caps

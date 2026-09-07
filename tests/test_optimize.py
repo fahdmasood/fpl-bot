@@ -79,7 +79,7 @@ def test_optimum_beats_a_naive_greedy_pick(setup):
     The greedy walk reserves enough budget to fill its remaining slots at the
     cheapest available price, so it always completes a legal 15. An earlier
     version of this test let greedy stall at 13 players and then skipped its
-    only assertion — it passed while proving nothing.
+    only assertion, it passed while proving nothing.
     """
     players, projections, rules = setup
     squad = pick_squad(players, projections, rules)

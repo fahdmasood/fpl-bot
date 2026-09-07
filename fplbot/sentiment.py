@@ -224,7 +224,7 @@ def aggregate(
 
         The mean alone gives direction without letting volume matter: ten
         mentions of the same claim say no more than one. But a mean also
-        cancels the decay for a lone mention — (s x w) / w = s — so a
+        cancels the decay for a lone mention, (s x w) / w = s, so a
         fortnight-old "he has a knock" would move the projection exactly as
         much as this morning's. Multiplying by the single best weight (its
         confidence x source trust x recency) restores that attenuation
