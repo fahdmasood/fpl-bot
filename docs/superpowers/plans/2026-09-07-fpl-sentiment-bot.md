@@ -1441,24 +1441,61 @@ def test_captain_is_the_highest_projected_starter(setup):
 
 
 def test_optimum_beats_a_naive_greedy_pick(setup):
-    """The whole reason for using an ILP rather than sorting by points."""
+    """The whole reason for using an ILP rather than sorting by points.
+
+    The greedy walk reserves enough budget to fill its remaining slots at the
+    cheapest available price, so it always completes a legal 15. An earlier
+    version of this test let greedy stall at 13 players and then skipped its
+    only assertion — it passed while proving nothing.
+    """
     players, projections, rules = setup
     squad = pick_squad(players, projections, rules)
-    optimal = sum(projections[i].total for i in squad.players)
+    optimal = sum(projections[i].total for i in squad.starting_xi)
 
-    by_id = {p.id: p for p in players}
-    greedy, spend, counts, clubs = [], 0, {}, {}
-    quota = {"GKP": 2, "DEF": 5, "MID": 5, "FWD": 3}
+    budget = rules["budget"]
+    remaining = dict(rules["quota"])
+    cheapest = {pos: min(p.now_cost for p in players if p.position == pos)
+                for pos in remaining}
+    greedy, clubs = [], {}
+
     for p in sorted(players, key=lambda p: projections[p.id].total, reverse=True):
-        if (counts.get(p.position, 0) < quota[p.position]
-                and spend + p.now_cost <= rules["budget"]
-                and clubs.get(p.team_id, 0) < rules["team_limit"]):
-            greedy.append(p.id)
-            spend += p.now_cost
-            counts[p.position] = counts.get(p.position, 0) + 1
-            clubs[p.team_id] = clubs.get(p.team_id, 0) + 1
-    if len(greedy) == 15:
-        assert optimal >= sum(projections[i].total for i in greedy)
+        if remaining.get(p.position, 0) == 0:
+            continue
+        if clubs.get(p.team_id, 0) >= rules["team_limit"]:
+            continue
+        reserve = sum(cheapest[q] * (remaining[q] - (1 if q == p.position else 0))
+                      for q in remaining)
+        if p.now_cost + reserve > budget:
+            continue
+        greedy.append(p.id)
+        budget -= p.now_cost
+        remaining[p.position] -= 1
+        clubs[p.team_id] = clubs.get(p.team_id, 0) + 1
+
+    assert len(greedy) == 15, f"greedy built only {len(greedy)} players; test is vacuous"
+    greedy_xi, _ = pick_xi(greedy, projections, rules, players)
+    assert optimal >= sum(projections[i].total for i in greedy_xi)
+
+
+def test_bench_is_discounted_but_still_playable(setup):
+    """Bench points are worth a fraction of starting points, but a bench of
+    players with no chance of appearing is worthless when a starter is ruled
+    out before the deadline."""
+    players, projections, rules = setup
+    squad = pick_squad(players, projections, rules)
+    by_id = {p.id: p for p in players}
+    bench = [i for i in squad.players if i not in set(squad.starting_xi)]
+    assert len(bench) == 4
+    unplayable = [by_id[i].web_name for i in bench if by_id[i].availability <= 0]
+    assert not unplayable, f"bench players who cannot play: {unplayable}"
+
+
+def test_starting_xi_is_chosen_jointly_with_the_squad(setup):
+    """pick_squad returns its own XI; it does not defer to a second solve."""
+    players, projections, rules = setup
+    squad = pick_squad(players, projections, rules)
+    assert len(squad.starting_xi) == rules["xi_size"]
+    assert set(squad.starting_xi) <= set(squad.players)
 
 
 def test_infeasible_projections_raise_a_clear_error(setup):
@@ -1488,6 +1525,15 @@ import pulp
 from fplbot.models import Player, Projection, Squad
 
 
+# A benched player scores only if an auto-substitution fires, so bench points
+# are worth a fraction of starting points. Weighting them equally spends real
+# budget on players who mostly never play; weighting them zero produces a
+# bench of non-starters that is useless when someone is ruled out on the
+# morning of a deadline. Measured on the snapshot: 0.1 recovers the full XI
+# gain of a pure XI-max objective while keeping a playable bench.
+BENCH_WEIGHT = 0.1
+
+
 class InfeasibleSquad(Exception):
     """No legal squad exists under these constraints."""
 
@@ -1496,18 +1542,35 @@ def pick_squad(
     players: list[Player], projections: dict[int, Projection], rules: dict
 ) -> Squad:
     problem = pulp.LpProblem("fpl_squad", pulp.LpMaximize)
-    pick = {p.id: pulp.LpVariable(f"p{p.id}", cat="Binary") for p in players}
+    # Squad and starting-XI membership are solved together. Choosing the 15
+    # first and the XI afterwards optimises the wrong quantity: it values a
+    # bench upgrade as highly as a starter upgrade.
+    pick = {p.id: pulp.LpVariable(f"sq{p.id}", cat="Binary") for p in players}
+    start = {p.id: pulp.LpVariable(f"st{p.id}", cat="Binary") for p in players}
 
-    problem += pulp.lpSum(projections[p.id].total * pick[p.id] for p in players)
+    problem += pulp.lpSum(
+        projections[p.id].total
+        * (start[p.id] + BENCH_WEIGHT * (pick[p.id] - start[p.id]))
+        for p in players
+    )
 
     problem += pulp.lpSum(pick.values()) == rules["squad_size"]
+    problem += pulp.lpSum(start.values()) == rules["xi_size"]
     # Costs are integer tenths of a million; keep them integers throughout.
     problem += pulp.lpSum(p.now_cost * pick[p.id] for p in players) <= rules["budget"]
+
+    for p in players:
+        problem += start[p.id] <= pick[p.id]
 
     for position, count in rules["quota"].items():
         problem += (
             pulp.lpSum(pick[p.id] for p in players if p.position == position) == count
         )
+
+    for position, (low, high) in rules["formation"].items():
+        in_position = [start[p.id] for p in players if p.position == position]
+        problem += pulp.lpSum(in_position) >= low
+        problem += pulp.lpSum(in_position) <= high
 
     for team_id in {p.team_id for p in players}:
         problem += (
@@ -1525,9 +1588,10 @@ def pick_squad(
         )
 
     chosen = [p.id for p in players if pick[p.id].value() == 1]
+    xi = [p.id for p in players if start[p.id].value() == 1]
     by_id = {p.id: p for p in players}
     spend = sum(by_id[i].now_cost for i in chosen)
-    xi, captain = pick_xi(chosen, projections, rules, players)
+    captain = max(xi, key=lambda i: projections[i].total)
     return Squad(
         players=chosen, starting_xi=xi, captain_id=captain,
         bank=rules["budget"] - spend,
@@ -1573,7 +1637,7 @@ def pick_xi(
 - [ ] **Step 4: Run tests**
 
 Run: `python3 -m pytest tests/test_optimize.py -v`
-Expected: 8 passed
+Expected: 10 passed
 
 - [ ] **Step 5: Commit**
 
