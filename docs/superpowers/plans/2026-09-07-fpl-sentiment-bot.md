@@ -20,7 +20,9 @@ Every task's requirements implicitly include this section.
 - **No FPL account credentials anywhere in this system.** The bot reads public endpoints only and never writes to a user's team.
 - **Horizon default 3 gameweeks, `decay_base = 0.84`** — weights 1.00 / 0.84 / 0.71.
 - **Sentiment modifier capped at ±15%, applied to the GW+1 term only**, never to GW+2 or GW+3, and never directly to a points total.
-- **Comment collection: 600 per run, hard ceiling 1000**, from at most 8 threads, score floor >= 3, age <= 36h, deduplicated on normalised text.
+- **Item collection: 600 per run, hard ceiling 1000**, score floor >= 3, age <= 36h, deduplicated on normalised text. Reddit, when enabled, draws from at most 8 threads.
+- **News RSS is the primary sentiment source; Reddit is optional and gated on approved Data API access.** A run without Reddit is the expected default, not a degraded state.
+- **Never store a comment author.** `NewsItem` has no `author` field and must not gain one — Reddit policy forbids inferring characteristics about users.
 - **Reddit User-Agent must be exactly** `python:fpl-bot:v1.0.0 (by /u/<username>)`. Generic UAs are heavily throttled by Reddit.
 - **One Reddit client id.** Registering multiple accounts or apps for the same use case violates Reddit's Responsible Builder Policy and risks a permanent block.
 - **Sentiment model:** `claude-haiku-4-5`.
@@ -1322,15 +1324,17 @@ git commit -m "feat: ILP squad and XI selection"
 
 **Interfaces:**
 - Consumes: `Settings` from `fplbot.config`; `NewsItem` from `fplbot.models`
-- Produces: `collect(settings, reddit=None, now=None) -> tuple[list[NewsItem], dict]` returning items and a stats dict with keys `comments_fetched`, `comments_after_filter`, `sources_used`, `degraded`; `filter_items(items, settings, now) -> list[NewsItem]`; `normalise(text) -> str`; `RedditCollector`, `RssCollector`, `RssFallbackCollector`
+- Produces: `collect(settings, reddit=None, now=None) -> tuple[list[NewsItem], dict]` returning items and a stats dict with keys `items_fetched`, `items_after_filter`, `sources_used`, `sources_absent`, `reddit_available`; `filter_items(items, settings, now) -> list[NewsItem]`; `normalise(text) -> str`; module constants `FEEDS`, `SOURCE_TRUST`; classes `RssCollector`, `RedditCollector`
 
-**Background the implementer needs:** Reddit's `/r/{sub}/comments/{id}` endpoint is **not** a listing — it has no `after`/`before` cursor, so "newest first, capped" is implemented with `sort="new"` plus a bounded `replace_more`, not a pagination loop. PRAW handles the OAuth client-credentials flow and the `morechildren` expansion.
+**Background the implementer needs:** The signal worth having is early availability news — injuries, knocks, rotation hints — reaching us before the statistics absorb it. Six news feeds are the primary source, all verified returning items on 2026-09-07. ESPN's soccer feed returns an empty document and Football365's 404s; both are deliberately excluded, so do not add them back.
 
-Rate limits are not a real constraint here: Reddit allows 100 queries per minute per client id, and a run costs 15-25 calls. Do not build throttling machinery.
+Sources carry a **trust tier**, exported as `SOURCE_TRUST`, which Task 7 uses to weight a mention's confidence. BBC, Guardian and Sky are 1.0; talkSPORT, Metro and Mirror are 0.6. The tabloids break real team news often enough to be worth reading and speculate often enough to be worth discounting.
 
-If Reddit credentials are absent, fall back to `https://www.reddit.com/r/FantasyPL/hot.rss`, which works unauthenticated but yields titles only. Mark such a run `degraded=True` — the report must say so, because sentiment without comments is materially weaker. Note that `reddit.com/r/.../hot.json` returns 403 to scripts and `old.reddit.com` redirects; only the `.rss` path works without auth.
+**Reddit is optional and gated on approval.** Reddit's Responsible Builder Policy requires explicit approved access before using their Data API; creating a script app is not sufficient. So `RedditCollector` runs only when credentials are present, and its absence is a normal state reported in `sources_absent` — not an error and not a fallback. Do not add an unauthenticated Reddit RSS path: a run either has approved API access or reports Reddit as absent.
 
-Exclude per-match live and bonus threads. They produce the most comments and the least decision-relevant text, so including them burns the cap on noise.
+Two policy constraints bind this file: never store a comment author (`NewsItem` has no `author` field — do not add one), and never retain collected text beyond the run.
+
+Reddit rate limits are not a real constraint (100 QPM per client, ~15-25 calls per run) so do not build throttling. `/comments/{id}` is not a listing and has no `after` cursor — use `sort="new"` plus a bounded `replace_more`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1340,39 +1344,49 @@ from datetime import datetime, timedelta, timezone
 
 from fplbot.config import Settings
 from fplbot.models import NewsItem
-from fplbot.news import filter_items, normalise
+from fplbot.news import FEEDS, SOURCE_TRUST, collect, filter_items, normalise
 
 NOW = datetime(2026, 9, 7, 12, 0, tzinfo=timezone.utc)
 
 
 def item(**kw):
-    base = dict(source="reddit", url="u", published_at=NOW - timedelta(hours=1),
+    base = dict(source="bbc", url="u", published_at=NOW - timedelta(hours=1),
                 title="t", body="Saka looked sharp", score=10)
     return NewsItem(**{**base, **kw})
 
 
-def test_drops_low_scoring_comments():
-    settings = Settings(cache_dir="/tmp/x")
-    kept = filter_items([item(score=1), item(score=5)], settings, NOW)
+def test_every_feed_has_a_trust_tier():
+    for name, _url in FEEDS:
+        assert name in SOURCE_TRUST, f"{name} has no trust tier"
+    assert SOURCE_TRUST["bbc"] > SOURCE_TRUST["mirror"]
+
+
+def test_excluded_feeds_are_not_present():
+    """ESPN returns an empty document and Football365 404s (verified 2026-09-07)."""
+    urls = " ".join(u for _n, u in FEEDS)
+    assert "espn" not in urls
+    assert "football365" not in urls
+
+
+def test_drops_low_scoring_items():
+    kept = filter_items([item(score=1), item(score=5)], Settings(cache_dir="/tmp/x"), NOW)
     assert len(kept) == 1
 
 
 def test_drops_stale_items():
-    settings = Settings(cache_dir="/tmp/x")
     old = item(published_at=NOW - timedelta(hours=72))
-    assert filter_items([old], settings, NOW) == []
+    assert filter_items([old], Settings(cache_dir="/tmp/x"), NOW) == []
 
 
 def test_deduplicates_on_normalised_text():
-    """The same claim gets copy-pasted across threads and would otherwise
-    be counted as several independent pieces of evidence."""
-    settings = Settings(cache_dir="/tmp/x")
+    """The same claim is syndicated across outlets and would otherwise count
+    as several independent pieces of evidence."""
     a = item(body="Saka is a doubt for Saturday!!")
-    b = item(body="saka is a doubt for saturday")
-    assert len(filter_items([a, b], settings, NOW)) == 1
+    b = item(source="mirror", body="saka is a doubt for saturday")
+    assert len(filter_items([a, b], Settings(cache_dir="/tmp/x"), NOW)) == 1
 
 
-def test_respects_the_comment_cap():
+def test_respects_the_item_cap():
     settings = Settings(cache_dir="/tmp/x", comment_cap=5)
     many = [item(body=f"unique text {i}") for i in range(50)]
     assert len(filter_items(many, settings, NOW)) == 5
@@ -1387,6 +1401,21 @@ def test_keeps_newest_first_when_capping():
 
 def test_normalise_strips_case_and_punctuation():
     assert normalise("Saka  is  OUT!!") == normalise("saka is out")
+
+
+def test_news_item_has_no_author_field():
+    """Reddit policy forbids inferring characteristics about users. The
+    pipeline must not carry an author at all."""
+    assert not hasattr(item(), "author")
+
+
+def test_collect_without_reddit_reports_it_absent_not_failed(monkeypatch):
+    import fplbot.news as news
+    monkeypatch.setattr(news.RssCollector, "collect", lambda self: [item()])
+    items, stats = collect(Settings(cache_dir="/tmp/x"), now=NOW)
+    assert stats["reddit_available"] is False
+    assert "reddit" in stats["sources_absent"]
+    assert items, "news-only run must still produce items"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1397,7 +1426,12 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'fplbot.news'`
 - [ ] **Step 3: Write `fplbot/news.py`**
 
 ```python
-"""Collect football text from Reddit and news RSS."""
+"""Collect football text from news feeds, and optionally Reddit.
+
+News is the primary source: the signal worth having is early availability
+news, which reaches the press before it reaches the statistics. Reddit is
+optional and requires approved Data API access.
+"""
 from __future__ import annotations
 
 import logging
@@ -1412,17 +1446,28 @@ from fplbot.models import NewsItem
 log = logging.getLogger(__name__)
 
 SUBREDDIT = "FantasyPL"
-RSS_FEEDS = [
+
+# Verified returning items on 2026-09-07. ESPN's soccer feed returns an empty
+# document and Football365's 404s; both are excluded deliberately.
+FEEDS = [
     ("bbc", "https://feeds.bbci.co.uk/sport/football/rss.xml"),
     ("guardian", "https://www.theguardian.com/football/rss"),
-]
-FALLBACK_FEEDS = [
-    ("reddit-rss", f"https://www.reddit.com/r/{SUBREDDIT}/hot.rss"),
-    ("reddit-rss", f"https://www.reddit.com/r/{SUBREDDIT}/new.rss"),
+    ("sky", "https://www.skysports.com/rss/12040"),
+    ("talksport", "https://talksport.com/football/feed/"),
+    ("metro", "https://metro.co.uk/sport/football/feed/"),
+    ("mirror", "https://www.mirror.co.uk/sport/football/?service=rss"),
 ]
 
-# These threads generate the most comments and the least decision-relevant
-# text. Including them is the fastest way to burn the cap on noise.
+# Multiplies a mention's confidence during aggregation (Task 7). The tabloids
+# break real team news often enough to read and speculate often enough to
+# discount.
+SOURCE_TRUST = {
+    "bbc": 1.0, "guardian": 1.0, "sky": 1.0,
+    "talksport": 0.6, "metro": 0.6, "mirror": 0.6,
+    "reddit-post": 0.7, "reddit-comment": 0.6,
+}
+
+# These threads carry the most comments and the least decision-relevant text.
 EXCLUDED_TITLE_PATTERNS = re.compile(
     r"(match thread|live thread|bonus point|rate my team|who to captain\?)", re.I
 )
@@ -1453,8 +1498,39 @@ def filter_items(items: list[NewsItem], settings: Settings, now: datetime) -> li
     return kept
 
 
+class RssCollector:
+    def __init__(self, feeds=FEEDS, default_score: int = 5):
+        self.feeds = feeds
+        self.default_score = default_score
+
+    def collect(self) -> list[NewsItem]:
+        items: list[NewsItem] = []
+        for name, url in self.feeds:
+            try:
+                parsed = feedparser.parse(url)
+            except Exception as exc:
+                log.warning("feed %s failed: %s", name, exc)
+                continue
+            for entry in parsed.entries:
+                published = entry.get("published_parsed") or entry.get("updated_parsed")
+                if not published:
+                    continue
+                items.append(
+                    NewsItem(
+                        source=name,
+                        url=entry.get("link", ""),
+                        published_at=datetime(*published[:6], tzinfo=timezone.utc),
+                        title=entry.get("title", ""),
+                        body=entry.get("summary", entry.get("title", "")),
+                        # RSS carries no score; pass the floor so these are kept.
+                        score=self.default_score,
+                    )
+                )
+        return items
+
+
 class RedditCollector:
-    """Full listings and comment trees via the official OAuth API."""
+    """Optional. Requires approved Reddit Data API access."""
 
     def __init__(self, settings: Settings, reddit=None):
         self.settings = settings
@@ -1491,10 +1567,12 @@ class RedditCollector:
                 )
             )
             submission.comment_sort = "new"
-            # Bounded expansion. /comments/{id} has no cursor, so depth and
-            # replace_more are the only levers on volume.
+            # /comments/{id} has no cursor; depth and replace_more are the
+            # only levers on volume.
             submission.comments.replace_more(limit=2)
             for comment in submission.comments.list():
+                # No author is recorded, deliberately: Reddit policy forbids
+                # inferring characteristics about users.
                 items.append(
                     NewsItem(
                         source="reddit-comment",
@@ -1511,77 +1589,41 @@ class RedditCollector:
         return items
 
 
-class RssCollector:
-    def __init__(self, feeds=RSS_FEEDS, default_score: int = 5):
-        self.feeds = feeds
-        self.default_score = default_score
-
-    def collect(self) -> list[NewsItem]:
-        items: list[NewsItem] = []
-        for name, url in self.feeds:
-            parsed = feedparser.parse(url)
-            for entry in parsed.entries:
-                published = entry.get("published_parsed") or entry.get("updated_parsed")
-                if not published:
-                    continue
-                items.append(
-                    NewsItem(
-                        source=name,
-                        url=entry.get("link", ""),
-                        published_at=datetime(*published[:6], tzinfo=timezone.utc),
-                        title=entry.get("title", ""),
-                        body=entry.get("summary", entry.get("title", "")),
-                        # RSS carries no score; pass the floor so these are kept.
-                        score=self.default_score,
-                    )
-                )
-        return items
-
-
-class RssFallbackCollector(RssCollector):
-    """Titles only. Used when Reddit credentials are unavailable."""
-
-    def __init__(self):
-        super().__init__(feeds=FALLBACK_FEEDS)
-
-
 def collect(settings: Settings, reddit=None, now: datetime | None = None):
     now = now or datetime.now(tz=timezone.utc)
     raw: list[NewsItem] = []
     sources_used: list[str] = []
-    degraded = False
-
-    have_credentials = bool(settings.reddit_client_id and settings.reddit_client_secret)
-    if have_credentials or reddit is not None:
-        try:
-            raw += RedditCollector(settings, reddit).collect()
-            sources_used.append("reddit-api")
-        except Exception as exc:
-            log.warning("Reddit API failed (%s); falling back to RSS", exc)
-            degraded = True
-    else:
-        log.warning("no Reddit credentials; comment-level signal unavailable")
-        degraded = True
-
-    if degraded:
-        try:
-            raw += RssFallbackCollector().collect()
-            sources_used.append("reddit-rss")
-        except Exception as exc:
-            log.warning("Reddit RSS fallback failed too: %s", exc)
+    sources_absent: list[str] = []
 
     try:
         raw += RssCollector().collect()
         sources_used.append("news-rss")
     except Exception as exc:
-        log.warning("news RSS failed: %s", exc)
+        log.warning("news feeds failed: %s", exc)
+        sources_absent.append("news-rss")
+
+    have_credentials = bool(settings.reddit_client_id and settings.reddit_client_secret)
+    reddit_available = False
+    if have_credentials or reddit is not None:
+        try:
+            raw += RedditCollector(settings, reddit).collect()
+            sources_used.append("reddit")
+            reddit_available = True
+        except Exception as exc:
+            log.warning("Reddit collection failed: %s", exc)
+            sources_absent.append("reddit")
+    else:
+        # Expected default: Reddit requires approved Data API access.
+        log.info("no Reddit credentials; running on news feeds alone")
+        sources_absent.append("reddit")
 
     kept = filter_items(raw, settings, now)
     stats = {
-        "comments_fetched": len(raw),
-        "comments_after_filter": len(kept),
+        "items_fetched": len(raw),
+        "items_after_filter": len(kept),
         "sources_used": sources_used,
-        "degraded": degraded,
+        "sources_absent": sources_absent,
+        "reddit_available": reddit_available,
     }
     return kept, stats
 ```
@@ -1589,13 +1631,13 @@ def collect(settings: Settings, reddit=None, now: datetime | None = None):
 - [ ] **Step 4: Run tests**
 
 Run: `python3 -m pytest tests/test_news.py -v`
-Expected: 6 passed
+Expected: 10 passed
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add fplbot/news.py tests/test_news.py
-git commit -m "feat: Reddit and RSS collection with filtering and degraded fallback"
+git commit -m "feat: news-first collection with trust tiers and optional Reddit"
 ```
 
 ---
@@ -1607,7 +1649,7 @@ git commit -m "feat: Reddit and RSS collection with filtering and degraded fallb
 - Test: `tests/test_sentiment.py`
 
 **Interfaces:**
-- Consumes: `Player`, `NewsItem`, `Mention`, `MentionScore`, `PlayerSentiment` from `fplbot.models`; `Settings` from `fplbot.config`
+- Consumes: `Player`, `NewsItem`, `Mention`, `MentionScore`, `PlayerSentiment` from `fplbot.models`; `Settings` from `fplbot.config`; `SOURCE_TRUST` from `fplbot.news`
 - Produces: `resolve_mentions(items, players) -> list[Mention]`; `Scorer` protocol with `score(mentions) -> dict[int, MentionScore]` keyed by index into `mentions`; `NullScorer`, `ApiScorer(api_key, model="claude-haiku-4-5")`, `SessionScorer(batch_path, scores_path)`; `aggregate(mentions, scores: dict[int, MentionScore], now, half_life_days=7) -> dict[int, PlayerSentiment]`
 
 **Background the implementer needs:** Resolution is deterministic string matching, not a model call. Match on `web_name` and on surname, case-insensitively, at word boundaries. Ambiguity is real and common — several Premier League squads contain players who share a surname — so when a surname matches more than one player, resolve using club context in the same text and **drop the mention if that fails**. A wrongly attributed injury rumour is worse than a missing one.
@@ -1739,6 +1781,7 @@ from pathlib import Path
 from typing import Protocol
 
 from fplbot.models import Mention, MentionScore, NewsItem, Player, PlayerSentiment
+from fplbot.news import SOURCE_TRUST
 
 log = logging.getLogger(__name__)
 
@@ -1923,7 +1966,10 @@ def aggregate(
         if score is None:
             continue
         age_days = (now - mention.item.published_at).total_seconds() / 86400
-        weight = min(1.0, max(0.0, score.confidence)) * 0.5 ** (age_days / half_life_days)
+        # Trust tier discounts sources that speculate; see news.SOURCE_TRUST.
+        trust = SOURCE_TRUST.get(mention.item.source, 0.6)
+        weight = (min(1.0, max(0.0, score.confidence)) * trust
+                  * 0.5 ** (age_days / half_life_days))
         bucket = by_player.setdefault(
             mention.player_id,
             {"avail": 0.0, "avail_w": 0.0, "form": 0.0, "form_w": 0.0,
