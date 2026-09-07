@@ -29,6 +29,26 @@ ALIASES: dict[str, str] = {
     "vvd": "van Dijk",
 }
 
+# Player names that are also ordinary English words. Matching one of these on
+# lowercased text alone produced real false positives in live runs:
+#
+#     "Chelsea paid cash for the deal"           -> Matty Cash, Aston Villa
+#     "Manchester United will mount a challenge" -> Mason Mount
+#     "Rice and beans is the king"               -> Rice, and King
+#
+# These are not harmless. RELEVANCE_FLOOR scales to the best evidence
+# available for a player, so a player whose only mention is spurious takes
+# his entire signal from it.
+#
+# MAINTENANCE: this set tracks the names in the current squads and goes stale
+# every transfer window. Recheck it each season, and whenever a signing
+# arrives whose name is also a common word.
+COMMON_WORD_NAMES = frozenset({
+    "cash", "rice", "mount", "wood", "white", "hall", "king", "sels", "eze",
+    "tel", "reed", "obi", "cho", "pau", "vaz", "young", "moore", "may",
+    "price", "banks", "france", "sanchez",
+})
+
 
 def _build_index(players: list[Player]) -> dict[str, list[Player]]:
     index: dict[str, list[Player]] = {}
@@ -36,6 +56,45 @@ def _build_index(players: list[Player]) -> dict[str, list[Player]]:
         for key in {p.web_name.lower(), p.web_name.split()[-1].lower()}:
             index.setdefault(key, []).append(p)
     return index
+
+
+def _capitalised_away_from_a_sentence_start(key: str, fields: list[str]) -> bool:
+    """True if `key` appears capitalised somewhere its capital means something.
+
+    Every sentence opens with a capital, so a leading "Cash" says nothing
+    about whether the writer meant the player or the money. A capital in the
+    middle of a sentence is a deliberate proper noun.
+
+    The title and the body are checked as separate texts: a headline is its
+    own sentence, so the first word of the body is a sentence opening even
+    though the two are concatenated before matching.
+    """
+    pattern = re.compile(rf"\b{re.escape(key)}\b", re.IGNORECASE)
+    for field in fields:
+        for match in pattern.finditer(field):
+            if not field[match.start()].isupper():
+                continue
+            before = field[: match.start()].rstrip()
+            # A colon or a dash still reads as mid sentence, and headlines
+            # use both ("Villa team news: Cash is fit").
+            if before and before[-1] not in ".!?":
+                return True
+    return False
+
+
+def _corroborated(key: str, player: Player, lowered: str, fields: list[str],
+                  team_names: dict[int, str]) -> bool:
+    """Whether a name that is also an ordinary word really means the player.
+
+    Accepted on either of two independent signals: the player's own club is
+    named in the same text, or the name is capitalised where a capital is
+    informative. Naming some other club is not corroboration, which is what
+    made "Chelsea paid cash for the deal" resolve to an Aston Villa defender.
+    """
+    club = team_names.get(player.team_id)
+    if club and club.lower() in lowered:
+        return True
+    return _capitalised_away_from_a_sentence_start(key, fields)
 
 
 def resolve_mentions(
@@ -50,6 +109,9 @@ def resolve_mentions(
     for item in items:
         text = f"{item.title} {item.body}"
         lowered = text.lower()
+        # The original casing is kept alongside the lowercased text: it is
+        # the only evidence that separates a player called Cash from money.
+        original_fields = [item.title, item.body]
         for alias, real in ALIASES.items():
             lowered = re.sub(rf"\b{re.escape(alias)}\b", real.lower(), lowered)
 
@@ -65,6 +127,12 @@ def resolve_mentions(
                 continue
 
             if len(matches) == 1:
+                # A name that is also an ordinary English word needs
+                # corroboration even when it is unambiguous as a name.
+                if key in COMMON_WORD_NAMES and not _corroborated(
+                        key, matches[0], lowered, original_fields, team_names):
+                    log.debug("dropped uncorroborated common word %r", key)
+                    continue
                 matched.setdefault(matches[0].id, key)
                 continue
 

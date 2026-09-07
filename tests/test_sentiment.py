@@ -170,3 +170,71 @@ def test_volume_is_recorded_but_separate():
     scores = {0: MentionScore(1, 0.5, "form", 0.8), 1: MentionScore(1, 0.5, "form", 0.8)}
     agg = aggregate(mentions, scores, NOW)
     assert agg[1].volume == 2
+
+
+# Real API club names, which are what resolve_mentions is given in the
+# pipeline. They matter: the API says "Man Utd", not "Manchester United".
+CLUBS = {1: "Aston Villa", 2: "Man Utd", 3: "Arsenal", 4: "Everton", 5: "Chelsea"}
+
+
+def test_an_ordinary_word_is_not_a_player_mention():
+    """Live false positive: "Chelsea paid cash for the deal" resolved to
+    Matty Cash of Aston Villa. Because RELEVANCE_FLOOR scales to the best
+    evidence for a player, one spurious mention becomes his entire signal."""
+    players = [make_player(1, "Cash", team=1)]
+    got = resolve_mentions([item("Chelsea paid cash for the deal")], players, CLUBS)
+    assert got == [], [m.matched_text for m in got]
+
+
+def test_a_club_name_containing_a_player_name_is_not_a_mention():
+    """"Manchester United will mount a challenge" resolved to Mason Mount."""
+    players = [make_player(1, "Mount", team=2)]
+    got = resolve_mentions(
+        [item("Manchester United will mount a challenge")], players, CLUBS)
+    assert got == [], [m.matched_text for m in got]
+
+
+def test_a_sentence_of_plain_english_yields_no_mentions():
+    """"Rice and beans is the king" resolved to both Rice and King."""
+    players = [make_player(1, "Rice", team=3), make_player(2, "King", team=4)]
+    got = resolve_mentions([item("Rice and beans is the king")], players, CLUBS)
+    assert got == [], [m.matched_text for m in got]
+
+
+def test_a_common_word_name_is_accepted_when_the_club_is_named():
+    players = [make_player(1, "Cash", team=1)]
+    got = resolve_mentions([item("Aston Villa's cash is fit again")], players, CLUBS)
+    assert [m.player_id for m in got] == [1]
+
+
+def test_a_common_word_name_is_accepted_when_capitalised_in_context():
+    """Capitalised mid sentence, so the capital is doing real work rather
+    than being the automatic capital every sentence opens with."""
+    players = [make_player(1, "Cash", team=1)]
+    got = resolve_mentions(
+        [item("Emery said Cash was excellent at right back")], players, CLUBS)
+    assert [m.player_id for m in got] == [1]
+
+
+def test_a_name_that_is_not_an_ordinary_word_still_matches_in_lower_case():
+    """The guard applies only to names that are also English words. Everyone
+    else must keep resolving from lowercased comment text."""
+    players = [make_player(1, "Saka", team=3)]
+    assert len(resolve_mentions([item("saka is fit again")], players, CLUBS)) == 1
+
+
+def test_a_bare_sentence_initial_common_word_name_is_dropped():
+    """A deliberate false negative, and the one place this guard costs signal.
+
+    "Cash was excellent at right back" with no club named and nothing before
+    it is indistinguishable, by capitalisation alone, from "Rice and beans is
+    the king": both are a capitalised common word opening a sentence. Since
+    one spurious mention becomes a player's entire signal, the pair is
+    resolved in favour of dropping both. A club name or any preceding clause
+    brings the mention back.
+    """
+    players = [make_player(1, "Cash", team=1)]
+    assert resolve_mentions([
+        NewsItem(source="bbc", url="u", published_at=NOW, title="",
+                 body="Cash was excellent at right back", score=10)
+    ], players, CLUBS) == []
