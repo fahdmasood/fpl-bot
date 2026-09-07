@@ -1637,7 +1637,7 @@ def pick_xi(
 - [ ] **Step 4: Run tests**
 
 Run: `python3 -m pytest tests/test_optimize.py -v`
-Expected: 10 passed
+Expected: 13 passed
 
 - [ ] **Step 5: Commit**
 
@@ -1656,7 +1656,7 @@ git commit -m "feat: ILP squad and XI selection"
 
 **Interfaces:**
 - Consumes: `Settings` from `fplbot.config`; `NewsItem` from `fplbot.models`
-- Produces: `collect(settings, reddit=None, now=None) -> tuple[list[NewsItem], dict]` returning items and a stats dict with keys `items_fetched`, `items_after_filter`, `sources_used`, `sources_absent`, `reddit_available`; `filter_items(items, settings, now) -> list[NewsItem]`; `normalise(text) -> str`; module constants `FEEDS`, `SOURCE_TRUST`; classes `RssCollector`, `RedditCollector`
+- Produces: `collect(settings, reddit=None, now=None) -> tuple[list[NewsItem], dict]` returning items and a stats dict with keys `items_fetched`, `items_after_filter`, `sources_used`, `sources_absent`, `reddit_available`, `reddit_status`; `filter_items(items, settings, now) -> list[NewsItem]`; `normalise(text) -> str`; module constants `FEEDS`, `SOURCE_TRUST`; classes `RssCollector`, `RedditCollector`
 
 **Background the implementer needs:** The signal worth having is early availability news — injuries, knocks, rotation hints — reaching us before the statistics absorb it. Six news feeds are the primary source, all verified returning items on 2026-09-07. ESPN's soccer feed returns an empty document and Football365's 404s; both are deliberately excluded, so do not add them back.
 
@@ -1747,7 +1747,34 @@ def test_collect_without_reddit_reports_it_absent_not_failed(monkeypatch):
     items, stats = collect(Settings(cache_dir="/tmp/x"), now=NOW)
     assert stats["reddit_available"] is False
     assert "reddit" in stats["sources_absent"]
+    assert stats["reddit_status"] == "not_configured"
     assert items, "news-only run must still produce items"
+
+
+def test_a_broken_reddit_is_distinguishable_from_an_absent_one(monkeypatch):
+    """Both end up in sources_absent, but "never set up" and "set up and
+    broken" need different responses from whoever reads the run."""
+    import fplbot.news as news
+
+    class Boom:
+        def subreddit(self, name):
+            raise RuntimeError("401 Unauthorized")
+
+    monkeypatch.setattr(news.RssCollector, "collect", lambda self: [item()])
+    items, stats = collect(Settings(cache_dir="/tmp/x"), reddit=Boom(), now=NOW)
+    assert stats["reddit_available"] is False
+    assert stats["reddit_status"].startswith("failed:")
+    assert items, "a broken Reddit must not lose the news items"
+
+
+def test_distinct_stories_sharing_an_opening_are_not_merged():
+    """Syndicated copy shares lead sentences. Keying dedupe on a prefix would
+    merge two different stories and throw away real evidence."""
+    lead = "The Premier League returns this weekend after the international break. "
+    a = item(body=lead + "Saka is expected to start against Chelsea.")
+    b = item(source="sky", body=lead + "Haaland has been ruled out with a knock.")
+    kept = filter_items([a, b], Settings(cache_dir="/tmp/x"), NOW)
+    assert len(kept) == 2, "two different stories were merged as duplicates"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1819,7 +1846,11 @@ def filter_items(items: list[NewsItem], settings: Settings, now: datetime) -> li
             continue
         if it.published_at < cutoff:
             continue
-        key = normalise(it.body)[:200]
+        # Key on the whole normalised body, not a prefix. Truncating to a
+        # fixed prefix merges distinct stories that share a syndicated opening
+        # sentence, and silently discarding real evidence is worse than
+        # counting one claim twice.
+        key = normalise(it.body)
         if key in seen:
             continue
         seen.add(key)
@@ -1936,18 +1967,25 @@ def collect(settings: Settings, reddit=None, now: datetime | None = None):
 
     have_credentials = bool(settings.reddit_client_id and settings.reddit_client_secret)
     reddit_available = False
+    # "Not configured" and "configured but broken" are different situations:
+    # the first is the expected default, the second is worth alerting on.
+    # Collapsing both into one absent-source string hides that from anyone
+    # reading the run's stats afterwards.
     if have_credentials or reddit is not None:
         try:
             raw += RedditCollector(settings, reddit).collect()
             sources_used.append("reddit")
             reddit_available = True
+            reddit_status = "ok"
         except Exception as exc:
             log.warning("Reddit collection failed: %s", exc)
             sources_absent.append("reddit")
+            reddit_status = f"failed: {type(exc).__name__}"
     else:
         # Expected default: Reddit requires approved Data API access.
         log.info("no Reddit credentials; running on news feeds alone")
         sources_absent.append("reddit")
+        reddit_status = "not_configured"
 
     kept = filter_items(raw, settings, now)
     stats = {
@@ -1956,6 +1994,7 @@ def collect(settings: Settings, reddit=None, now: datetime | None = None):
         "sources_used": sources_used,
         "sources_absent": sources_absent,
         "reddit_available": reddit_available,
+        "reddit_status": reddit_status,
     }
     return kept, stats
 ```
@@ -1963,7 +2002,7 @@ def collect(settings: Settings, reddit=None, now: datetime | None = None):
 - [ ] **Step 4: Run tests**
 
 Run: `python3 -m pytest tests/test_news.py -v`
-Expected: 10 passed
+Expected: 13 passed
 
 - [ ] **Step 5: Commit**
 

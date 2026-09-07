@@ -17,6 +17,9 @@ fplbot = "fplbot.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# PuLP emits thousands of deprecation warnings per run, which buries any
+# genuine warning the suite raises.
+filterwarnings = ["ignore::DeprecationWarning:pulp.*"]
 
 [build-system]
 requires = ["setuptools>=68"]
