@@ -84,6 +84,28 @@ def test_aggregate_decays_old_mentions():
     assert abs(stale) < abs(fresh)
 
 
+def test_volume_does_not_inflate_the_signal():
+    """Ten people repeating a claim is not ten pieces of evidence. Volume
+    measures popularity, not quality, and must never reach the model."""
+    players = [make_player(1, "Saka")]
+    one = resolve_mentions([item("Saka has a knock")], players)
+    many = resolve_mentions([item("Saka has a knock")] * 10, players)
+    score = MentionScore(1, sentiment=-0.8, category="injury", confidence=0.9)
+    single = aggregate(one, {0: score}, NOW)[1].availability_signal
+    repeated = aggregate(many, {i: score for i in range(10)}, NOW)[1].availability_signal
+    assert abs(single - repeated) < 1e-9, (single, repeated)
+
+
+def test_a_low_confidence_mention_moves_the_signal_less():
+    players = [make_player(1, "Saka")]
+    mentions = resolve_mentions([item("Saka has a knock")], players)
+    confident = aggregate(
+        mentions, {0: MentionScore(1, -1.0, "injury", 1.0)}, NOW)[1].availability_signal
+    unsure = aggregate(
+        mentions, {0: MentionScore(1, -1.0, "injury", 0.2)}, NOW)[1].availability_signal
+    assert abs(unsure) < abs(confident)
+
+
 def test_aggregate_signals_stay_in_range():
     players = [make_player(1, "Saka")]
     mentions = resolve_mentions([item("Saka has a knock")] * 1, players)
