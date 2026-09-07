@@ -110,6 +110,30 @@ def test_a_swarm_of_weak_mentions_cannot_overturn_a_strong_one():
     assert signal < -0.5, f"a comment flood overturned a wire report: {signal}"
 
 
+def test_moderate_trust_evidence_is_not_silently_inert():
+    """Credible but lower confidence reporting must be able to move a signal.
+
+    A floor set too high makes an entire tier of sources count for nothing at
+    any volume, which is a false negative rather than caution: several
+    Saturday reports that a player trained should eventually outweigh one
+    Friday injury note.
+    """
+    players = [make_player(1, "Saka")]
+    friday = item("Saka limped off and is a doubt", hours_ago=24)
+    saturday = [item("Saka trained fully today", src="sky") for _ in range(5)]
+    mentions = resolve_mentions([friday] + saturday, players)
+
+    scores = {0: MentionScore(1, sentiment=-1.0, category="injury", confidence=1.0)}
+    for i in range(1, len(mentions)):
+        scores[i] = MentionScore(1, sentiment=0.7, category="injury", confidence=0.5)
+
+    with_contradiction = aggregate(mentions, scores, NOW)[1].availability_signal
+    alone = aggregate(mentions[:1], {0: scores[0]}, NOW)[1].availability_signal
+    assert with_contradiction > alone, (
+        f"credible contradicting reports had no effect: {alone} to {with_contradiction}"
+    )
+
+
 def test_volume_does_not_inflate_the_signal():
     """Ten people repeating a claim is not ten pieces of evidence. Volume
     measures popularity, not quality, and must never reach the model."""

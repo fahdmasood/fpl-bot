@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 # A mention is only allowed to influence the signal if its weight is within
 # this fraction of the best evidence available for that player. Without it,
 # a large enough pile of weak chatter drowns out one confident report.
-RELEVANCE_FLOOR = 0.5
+RELEVANCE_FLOOR = 0.25
 
 AVAILABILITY_CATEGORIES = {"injury", "rotation"}
 FORM_CATEGORIES = {"form", "hype"}
