@@ -14,8 +14,12 @@ for it, and makes no transfers.
 
 ## Success criteria
 
-1. A run produces a legal 15-man squad — £100.0m budget, 2/5/5/3 by position,
-   at most 3 players per club — with a starting XI and a captain.
+1. A run produces a legal 15-man squad — with a starting XI and a captain —
+   satisfying the constraints *as read from the API*
+   (`game_settings.squad_total_spend`, `squad_squadsize`, `squad_team_limit`,
+   and `element_types[].squad_min_play`/`squad_max_play`), not hardcoded. At
+   time of writing those are £100.0m, 15 players, max 3 per club, and an XI of
+   1 GKP / 3-5 DEF / 2-5 MID / 1-3 FWD.
 2. Every selection carries a reason a human can check: the projected points,
    and the sentiment signals that moved it.
 3. When given an FPL team ID, the report also lists the transfers that would
@@ -157,7 +161,8 @@ decay over a 7-day half-life, plus mention volume as a separate field. Volume
 is reported but never fed to the model — it measures popularity, not quality.
 
 ### `projection.py`
-Expected points per player over the next N gameweeks (default 1, configurable):
+Expected points per player over the next N gameweeks (default 3, decayed; see
+Resolved parameters):
 
 - **Minutes probability** from recent minutes, `status`, and
   `chance_of_playing_next_round`.
@@ -166,6 +171,10 @@ Expected points per player over the next N gameweeks (default 1, configurable):
 - **Clean sheet probability** from the club's `expected_goals_conceded` against
   fixture difficulty; applies to goalkeepers and defenders, and partially to
   midfielders.
+- **Defensive contribution** from the `defensive_contribution_per_90` field.
+  Defenders score for clearances/blocks/interceptions above a threshold;
+  midfielders and forwards on a combined tackles-and-recoveries measure. This
+  is a real and often-overlooked points source for defensive midfielders.
 - **Bonus** estimated from ICT and historical BPS rate.
 
 Sentiment enters as a **bounded modifier**, capped at ±15%, applied to minutes
