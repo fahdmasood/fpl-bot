@@ -82,6 +82,50 @@ def _capitalised_away_from_a_sentence_start(key: str, fields: list[str]) -> bool
     return False
 
 
+# How people write club names, against how the FPL API spells them. Without
+# this the club test is a raw substring match and is silently dead in both
+# directions: "Manchester United" does not contain "man utd", and "Hull" does
+# not contain "hull city".
+#
+# Three letter codes are deliberately excluded. Sunderland is SUN, and
+# matching that would resolve any mention of the sun or the newspaper.
+CLUB_ALIASES: dict[str, set[str]] = {
+    "Man City": {"manchester city", "man city"},
+    "Man Utd": {"manchester united", "man utd", "man united"},
+    "Spurs": {"tottenham", "tottenham hotspur", "spurs"},
+    "Nott'm Forest": {"nottingham forest", "nott'm forest", "notts forest"},
+    "Hull City": {"hull"},
+    "Ipswich Town": {"ipswich"},
+    "Coventry City": {"coventry"},
+    "Leeds": {"leeds united", "leeds"},
+    "Crystal Palace": {"crystal palace", "palace"},
+    "Aston Villa": {"aston villa", "villa"},
+    "Newcastle": {"newcastle united", "newcastle"},
+    "Brighton": {"brighton and hove albion", "brighton"},
+    "Bournemouth": {"afc bournemouth", "bournemouth"},
+    "West Ham": {"west ham united", "west ham"},
+    "Wolves": {"wolverhampton wanderers", "wolverhampton", "wolves"},
+    "Sheffield Utd": {"sheffield united", "sheffield utd"},
+    "Luton": {"luton town", "luton"},
+    "Burnley": {"burnley"},
+}
+
+
+def club_aliases(name: str) -> set[str]:
+    """Every spelling that means this club, including the API's own."""
+    return CLUB_ALIASES.get(name, set()) | {name.lower()}
+
+
+def _appears_capitalised(key: str, fields: list[str]) -> bool:
+    """Whether the name appears capitalised anywhere in the original text."""
+    pattern = re.compile(rf"\b{re.escape(key)}\b", re.IGNORECASE)
+    for field in fields:
+        for match in pattern.finditer(field):
+            if match.group(0)[:1].isupper():
+                return True
+    return False
+
+
 def _corroborated(key: str, player: Player, lowered: str, fields: list[str],
                   team_names: dict[int, str]) -> bool:
     """Whether a name that is also an ordinary word really means the player.
@@ -91,8 +135,15 @@ def _corroborated(key: str, player: Player, lowered: str, fields: list[str],
     informative. Naming some other club is not corroboration, which is what
     made "Chelsea paid cash for the deal" resolve to an Aston Villa defender.
     """
+    # A lowercase occurrence is not a proper noun, so it is not the player,
+    # whichever club happens to be named. Without this, fixing club matching
+    # re-admits "Manchester United will mount a title challenge" as Mason
+    # Mount, because his club really is named in that sentence.
+    if not _appears_capitalised(key, fields):
+        return False
+
     club = team_names.get(player.team_id)
-    if club and club.lower() in lowered:
+    if club and any(alias in lowered for alias in club_aliases(club)):
         return True
     return _capitalised_away_from_a_sentence_start(key, fields)
 
@@ -140,7 +191,8 @@ def resolve_mentions(
             # drop it: a misattributed injury rumour is worse than none.
             disambiguated = [
                 p for p in matches
-                if team_names.get(p.team_id, "\0").lower() in lowered
+                if any(alias in lowered
+                       for alias in club_aliases(team_names.get(p.team_id, "\0")))
             ]
             if len(disambiguated) == 1:
                 matched.setdefault(disambiguated[0].id, key)

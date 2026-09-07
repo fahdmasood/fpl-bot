@@ -30,14 +30,17 @@ upper, so the capitalisation signal carries no information and
 "CHELSEA PAID CASH FOR THE DEAL" resolves to Matty Cash. Tabloid RSS titles do
 use caps.
 
-**Club corroboration is dead for three clubs.** Matching is a raw substring
-test against the API's club names, so "Tottenham", "Nottingham Forest" and
-"Manchester United" never match the API's "Spurs", "Nott'm Forest" and
-"Man Utd". For players at those clubs the corroboration clause silently never
-fires, which both loses real mentions and lets "Man Utd will mount a title
-challenge" resolve to Mason Mount. **This is the highest value thing to fix
-next**: it is a small change and it restores the safety valve that the
-common-word guard depends on.
+The converse also costs something: a lowercase occurrence is never treated as
+a player, so a writer who does not capitalise a name loses that mention. That
+is the deliberate side to err on, since a spurious mention becomes a player's
+entire signal.
+
+**Club matching is a curated alias list.** `CLUB_ALIASES` in `sentiment.py`
+maps how people write club names onto how the API spells them, because the
+API says "Man Utd", "Spurs", "Nott'm Forest" and "Hull City" and almost nobody
+else does. Three letter codes are deliberately excluded: Sunderland is SUN,
+and matching that would resolve any mention of the sun or the newspaper. The
+list needs a new entry whenever a club is promoted.
 
 **`COMMON_WORD_NAMES` needs maintenance.** It is a hand-curated list and goes
 stale every transfer window.

@@ -209,8 +209,23 @@ def test_a_sentence_of_plain_english_yields_no_mentions():
 
 def test_a_common_word_name_is_accepted_when_the_club_is_named():
     players = [make_player(1, "Cash", team=1)]
-    got = resolve_mentions([item("Aston Villa's cash is fit again")], players, CLUBS)
+    got = resolve_mentions([item("Aston Villa's Cash is fit again")], players, CLUBS)
     assert [m.player_id for m in got] == [1]
+
+
+def test_a_lowercase_common_word_is_never_the_player_even_with_the_club_named():
+    """Real copy capitalises names, so a lowercase occurrence is the ordinary
+    word. Without this rule, fixing club matching re-admits "Manchester
+    United will mount a title challenge" as Mason Mount, because his club
+    genuinely is named in that sentence.
+
+    The cost is a mention lost whenever a writer does not capitalise a name,
+    which is the right side to err on: a spurious mention becomes that
+    player's entire signal.
+    """
+    players = [make_player(1, "Cash", team=1)]
+    got = resolve_mentions([item("Aston Villa's cash is fit again")], players, CLUBS)
+    assert got == []
 
 
 def test_a_common_word_name_is_accepted_when_capitalised_in_context():
@@ -262,3 +277,45 @@ def test_a_score_for_the_wrong_player_is_skipped_not_applied():
 
     assert 2 not in agg, "a mismatched score was applied to the wrong player"
     assert agg[1].volume == 1, "the mismatched score still counted as evidence"
+
+
+def test_club_context_matches_how_people_actually_write_club_names():
+    """The club clause is the safety valve for common word names, so it has
+    to fire on the words people write, not only on the API's own spelling.
+
+    The API calls them "Man Utd", "Spurs", "Nott'm Forest" and "Hull City".
+    Nobody writes those. A raw substring test against the API name is
+    silently dead in both directions: "Manchester United" does not contain
+    "man utd", and "Hull" does not contain "hull city".
+    """
+    players = [make_player(1, "Cash", team=1), make_player(2, "Cash", team=2)]
+    teams = {1: "Man Utd", 2: "Spurs"}
+
+    # Ambiguous surname, resolved only if the club is recognised.
+    long_form = resolve_mentions(
+        [item("Manchester United's Cash is injured")], players, teams)
+    assert [m.player_id for m in long_form] == [1]
+
+    spurs = resolve_mentions(
+        [item("Tottenham's Cash is injured")], players, teams)
+    assert [m.player_id for m in spurs] == [2]
+
+
+def test_club_context_matches_a_short_name_against_a_longer_api_name():
+    players = [make_player(1, "Cash", team=1), make_player(2, "Cash", team=2)]
+    teams = {1: "Hull City", 2: "Nott'm Forest"}
+
+    assert [m.player_id for m in resolve_mentions(
+        [item("Hull's Cash is injured")], players, teams)] == [1]
+    assert [m.player_id for m in resolve_mentions(
+        [item("Nottingham Forest's Cash is injured")], players, teams)] == [2]
+
+
+def test_club_aliases_do_not_introduce_false_positives():
+    """Three letter codes are deliberately not aliases. Sunderland is SUN,
+    and matching that would resolve any mention of the sun or a newspaper.
+    """
+    players = [make_player(1, "Cash", team=1), make_player(2, "Cash", team=2)]
+    teams = {1: "Sunderland", 2: "Arsenal"}
+    assert resolve_mentions(
+        [item("The Sun reported that Cash is injured")], players, teams) == []
