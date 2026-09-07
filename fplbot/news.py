@@ -1,0 +1,200 @@
+"""Collect football text from news feeds, and optionally Reddit.
+
+News is the primary source: the signal worth having is early availability
+news, which reaches the press before it reaches the statistics. Reddit is
+optional and requires approved Data API access.
+"""
+from __future__ import annotations
+
+import logging
+import re
+from datetime import datetime, timedelta, timezone
+
+import feedparser
+
+from fplbot.config import Settings, user_agent
+from fplbot.models import NewsItem
+
+log = logging.getLogger(__name__)
+
+SUBREDDIT = "FantasyPL"
+
+# Verified returning items on 2026-09-07. ESPN's soccer feed returns an empty
+# document and Football365's 404s; both are excluded deliberately.
+FEEDS = [
+    ("bbc", "https://feeds.bbci.co.uk/sport/football/rss.xml"),
+    ("guardian", "https://www.theguardian.com/football/rss"),
+    ("sky", "https://www.skysports.com/rss/12040"),
+    ("talksport", "https://talksport.com/football/feed/"),
+    ("metro", "https://metro.co.uk/sport/football/feed/"),
+    ("mirror", "https://www.mirror.co.uk/sport/football/?service=rss"),
+]
+
+# Multiplies a mention's confidence during aggregation (Task 7). The tabloids
+# break real team news often enough to read and speculate often enough to
+# discount.
+SOURCE_TRUST = {
+    "bbc": 1.0, "guardian": 1.0, "sky": 1.0,
+    "talksport": 0.6, "metro": 0.6, "mirror": 0.6,
+    "reddit-post": 0.7, "reddit-comment": 0.6,
+}
+
+# These threads carry the most comments and the least decision-relevant text.
+EXCLUDED_TITLE_PATTERNS = re.compile(
+    r"(match thread|live thread|bonus point|rate my team|who to captain\?)", re.I
+)
+
+
+def normalise(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", "", text.lower()).strip())
+
+
+def filter_items(items: list[NewsItem], settings: Settings, now: datetime) -> list[NewsItem]:
+    cutoff = now - timedelta(hours=settings.max_age_hours)
+    seen: set[str] = set()
+    kept: list[NewsItem] = []
+
+    for it in sorted(items, key=lambda i: i.published_at, reverse=True):
+        if it.score < settings.score_floor:
+            continue
+        if it.published_at < cutoff:
+            continue
+        key = normalise(it.body)[:200]
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(it)
+        if len(kept) >= settings.comment_cap:
+            break
+
+    return kept
+
+
+class RssCollector:
+    def __init__(self, feeds=FEEDS, default_score: int = 5):
+        self.feeds = feeds
+        self.default_score = default_score
+
+    def collect(self) -> list[NewsItem]:
+        items: list[NewsItem] = []
+        for name, url in self.feeds:
+            try:
+                parsed = feedparser.parse(url)
+            except Exception as exc:
+                log.warning("feed %s failed: %s", name, exc)
+                continue
+            for entry in parsed.entries:
+                published = entry.get("published_parsed") or entry.get("updated_parsed")
+                if not published:
+                    continue
+                items.append(
+                    NewsItem(
+                        source=name,
+                        url=entry.get("link", ""),
+                        published_at=datetime(*published[:6], tzinfo=timezone.utc),
+                        title=entry.get("title", ""),
+                        body=entry.get("summary", entry.get("title", "")),
+                        # RSS carries no score; pass the floor so these are kept.
+                        score=self.default_score,
+                    )
+                )
+        return items
+
+
+class RedditCollector:
+    """Optional. Requires approved Reddit Data API access."""
+
+    def __init__(self, settings: Settings, reddit=None):
+        self.settings = settings
+        self.reddit = reddit or self._connect()
+
+    def _connect(self):
+        import praw
+
+        return praw.Reddit(
+            client_id=self.settings.reddit_client_id,
+            client_secret=self.settings.reddit_client_secret,
+            user_agent=user_agent(self.settings.reddit_username or "fplbot"),
+        )
+
+    def collect(self) -> list[NewsItem]:
+        items: list[NewsItem] = []
+        subreddit = self.reddit.subreddit(SUBREDDIT)
+
+        threads = [
+            s for s in subreddit.hot(limit=25)
+            if not EXCLUDED_TITLE_PATTERNS.search(s.title)
+        ][: self.settings.max_threads]
+
+        for submission in threads:
+            items.append(
+                NewsItem(
+                    source="reddit-post",
+                    url=f"https://reddit.com{submission.permalink}",
+                    published_at=datetime.fromtimestamp(
+                        submission.created_utc, tz=timezone.utc),
+                    title=submission.title,
+                    body=submission.selftext or submission.title,
+                    score=submission.score,
+                )
+            )
+            submission.comment_sort = "new"
+            # /comments/{id} has no cursor; depth and replace_more are the
+            # only levers on volume.
+            submission.comments.replace_more(limit=2)
+            for comment in submission.comments.list():
+                # No author is recorded, deliberately: Reddit policy forbids
+                # inferring characteristics about users.
+                items.append(
+                    NewsItem(
+                        source="reddit-comment",
+                        url=f"https://reddit.com{comment.permalink}",
+                        published_at=datetime.fromtimestamp(
+                            comment.created_utc, tz=timezone.utc),
+                        title=submission.title,
+                        body=comment.body,
+                        score=comment.score,
+                    )
+                )
+                if len(items) >= self.settings.comment_ceiling:
+                    return items
+        return items
+
+
+def collect(settings: Settings, reddit=None, now: datetime | None = None):
+    now = now or datetime.now(tz=timezone.utc)
+    raw: list[NewsItem] = []
+    sources_used: list[str] = []
+    sources_absent: list[str] = []
+
+    try:
+        raw += RssCollector().collect()
+        sources_used.append("news-rss")
+    except Exception as exc:
+        log.warning("news feeds failed: %s", exc)
+        sources_absent.append("news-rss")
+
+    have_credentials = bool(settings.reddit_client_id and settings.reddit_client_secret)
+    reddit_available = False
+    if have_credentials or reddit is not None:
+        try:
+            raw += RedditCollector(settings, reddit).collect()
+            sources_used.append("reddit")
+            reddit_available = True
+        except Exception as exc:
+            log.warning("Reddit collection failed: %s", exc)
+            sources_absent.append("reddit")
+    else:
+        # Expected default: Reddit requires approved Data API access.
+        log.info("no Reddit credentials; running on news feeds alone")
+        sources_absent.append("reddit")
+
+    kept = filter_items(raw, settings, now)
+    stats = {
+        "items_fetched": len(raw),
+        "items_after_filter": len(kept),
+        "sources_used": sources_used,
+        "sources_absent": sources_absent,
+        "reddit_available": reddit_available,
+    }
+    return kept, stats
