@@ -909,7 +909,12 @@ def test_sentiment_cannot_rescue_a_flagged_player():
 
 
 def test_later_gameweeks_are_decayed(projections):
-    p = max(projections.values(), key=lambda x: x.total)
+    """Pick a player scoring in both weeks; a blank gameweek is a legitimate
+    zero and would make a naive comparison flake."""
+    both = [p for p in projections.values()
+            if p.per_gameweek[0] > 0 and p.per_gameweek[1] > 0]
+    assert both, "no player projects points in both of the first two gameweeks"
+    p = max(both, key=lambda x: x.total)
     assert p.per_gameweek[1] < p.per_gameweek[0]
 ```
 
@@ -1075,7 +1080,7 @@ git commit -m "feat: expected-points model with capped GW+1 sentiment modifier"
 
 **Interfaces:**
 - Consumes: `Player`, `Projection`, `Squad` from `fplbot.models`; `squad_rules()` output from `fplbot.fetch`
-- Produces: `pick_squad(players, projections, rules) -> Squad`; `pick_xi(squad_players, projections, rules) -> tuple[list[int], int]`; exception `InfeasibleSquad(Exception)`
+- Produces: `pick_squad(players, projections, rules) -> Squad`; `pick_xi(squad_player_ids, projections, rules, players) -> tuple[list[int], int]`; exception `InfeasibleSquad(Exception)`
 
 **Background the implementer needs:** This is a binary integer program, and PuLP with its bundled CBC solver handles it in well under a second at this size. Maximise the sum of projected points over a 0/1 selection variable per player, subject to budget, squad size, per-position quota, and the per-club limit.
 
@@ -1146,7 +1151,7 @@ def test_xi_is_eleven_with_a_legal_formation(setup):
     players, projections, rules = setup
     squad = pick_squad(players, projections, rules)
     by_id = {p.id: p for p in players}
-    xi, captain = pick_xi(squad.players, projections, rules)
+    xi, captain = pick_xi(squad.players, projections, rules, players)
     assert len(xi) == 11
     assert set(xi) <= set(squad.players)
     counts = {}
@@ -1160,7 +1165,7 @@ def test_xi_is_eleven_with_a_legal_formation(setup):
 def test_captain_is_the_highest_projected_starter(setup):
     players, projections, rules = setup
     squad = pick_squad(players, projections, rules)
-    xi, captain = pick_xi(squad.players, projections, rules)
+    xi, captain = pick_xi(squad.players, projections, rules, players)
     assert captain in xi
     assert projections[captain].total == max(projections[i].total for i in xi)
 
@@ -1271,10 +1276,8 @@ def pick_xi(
     squad_player_ids: list[int],
     projections: dict[int, Projection],
     rules: dict,
-    players: list[Player] | None = None,
+    players: list[Player],
 ) -> tuple[list[int], int]:
-    if players is None:
-        raise ValueError("pick_xi needs the player list to read positions")
     by_id = {p.id: p for p in players if p.id in set(squad_player_ids)}
 
     problem = pulp.LpProblem("fpl_xi", pulp.LpMaximize)
@@ -1605,7 +1608,7 @@ git commit -m "feat: Reddit and RSS collection with filtering and degraded fallb
 
 **Interfaces:**
 - Consumes: `Player`, `NewsItem`, `Mention`, `MentionScore`, `PlayerSentiment` from `fplbot.models`; `Settings` from `fplbot.config`
-- Produces: `resolve_mentions(items, players) -> list[Mention]`; `Scorer` protocol with `score(mentions) -> list[MentionScore]`; `NullScorer`, `ApiScorer(api_key, model="claude-haiku-4-5")`, `SessionScorer(batch_path, scores_path)`; `aggregate(mentions, scores, now, half_life_days=7) -> dict[int, PlayerSentiment]`
+- Produces: `resolve_mentions(items, players) -> list[Mention]`; `Scorer` protocol with `score(mentions) -> dict[int, MentionScore]` keyed by index into `mentions`; `NullScorer`, `ApiScorer(api_key, model="claude-haiku-4-5")`, `SessionScorer(batch_path, scores_path)`; `aggregate(mentions, scores: dict[int, MentionScore], now, half_life_days=7) -> dict[int, PlayerSentiment]`
 
 **Background the implementer needs:** Resolution is deterministic string matching, not a model call. Match on `web_name` and on surname, case-insensitively, at word boundaries. Ambiguity is real and common — several Premier League squads contain players who share a surname — so when a surname matches more than one player, resolve using club context in the same text and **drop the mention if that fails**. A wrongly attributed injury rumour is worse than a missing one.
 
@@ -1667,13 +1670,25 @@ def test_ambiguous_surname_resolved_by_club_context():
 
 
 def test_null_scorer_returns_nothing():
-    assert NullScorer().score([1, 2, 3]) == []
+    assert NullScorer().score([1, 2, 3]) == {}
+
+
+def test_scores_are_matched_by_index_not_position():
+    """A discarded batch must not shift scores onto the wrong player."""
+    players = [make_player(1, "Saka"), make_player(2, "Odegaard")]
+    mentions = resolve_mentions(
+        [item("Saka has a knock"), item("Odegaard has a knock")], players)
+    assert [m.player_id for m in mentions] == [1, 2]
+    # Only the second mention scored; the first was dropped as malformed.
+    agg = aggregate(mentions, {1: MentionScore(2, -0.8, "injury", 0.9)}, NOW)
+    assert 1 not in agg
+    assert agg[2].availability_signal < 0
 
 
 def test_aggregate_splits_availability_and_form_signals():
     players = [make_player(1, "Saka")]
     mentions = resolve_mentions([item("Saka has a knock")], players)
-    scores = [MentionScore(1, sentiment=-0.8, category="injury", confidence=0.9)]
+    scores = {0: MentionScore(1, sentiment=-0.8, category="injury", confidence=0.9)}
     agg = aggregate(mentions, scores, NOW)
     assert agg[1].availability_signal < 0
     assert agg[1].form_signal == 0
@@ -1683,7 +1698,7 @@ def test_aggregate_decays_old_mentions():
     players = [make_player(1, "Saka")]
     recent = resolve_mentions([item("Saka has a knock", hours_ago=1)], players)
     old = resolve_mentions([item("Saka has a knock", hours_ago=24 * 14)], players)
-    score = [MentionScore(1, sentiment=-1.0, category="injury", confidence=1.0)]
+    score = {0: MentionScore(1, sentiment=-1.0, category="injury", confidence=1.0)}
     fresh = aggregate(recent, score, NOW)[1].availability_signal
     stale = aggregate(old, score, NOW)[1].availability_signal
     assert abs(stale) < abs(fresh)
@@ -1692,7 +1707,7 @@ def test_aggregate_decays_old_mentions():
 def test_aggregate_signals_stay_in_range():
     players = [make_player(1, "Saka")]
     mentions = resolve_mentions([item("Saka has a knock")] * 1, players)
-    scores = [MentionScore(1, sentiment=-5.0, category="injury", confidence=2.0)]
+    scores = {0: MentionScore(1, sentiment=-5.0, category="injury", confidence=2.0)}
     agg = aggregate(mentions, scores, NOW)
     assert -1.0 <= agg[1].availability_signal <= 1.0
 
@@ -1700,7 +1715,7 @@ def test_aggregate_signals_stay_in_range():
 def test_volume_is_recorded_but_separate():
     players = [make_player(1, "Saka")]
     mentions = resolve_mentions([item("Saka good"), item("Saka great")], players)
-    scores = [MentionScore(1, 0.5, "form", 0.8), MentionScore(1, 0.5, "form", 0.8)]
+    scores = {0: MentionScore(1, 0.5, "form", 0.8), 1: MentionScore(1, 0.5, "form", 0.8)}
     agg = aggregate(mentions, scores, NOW)
     assert agg[1].volume == 2
 ```
@@ -1739,7 +1754,7 @@ ALIASES: dict[str, str] = {
 }
 
 
-def _candidates(text: str, players: list[Player]) -> dict[str, list[Player]]:
+def _build_index(players: list[Player]) -> dict[str, list[Player]]:
     index: dict[str, list[Player]] = {}
     for p in players:
         for key in {p.web_name.lower(), p.web_name.split()[-1].lower()}:
@@ -1752,7 +1767,7 @@ def resolve_mentions(
     players: list[Player],
     team_names: dict[int, str] | None = None,
 ) -> list[Mention]:
-    index = _candidates("", players)
+    index = _build_index(players)
     team_names = team_names or {}
     mentions: list[Mention] = []
 
@@ -1785,20 +1800,27 @@ def resolve_mentions(
 
 
 class Scorer(Protocol):
-    def score(self, mentions: list[Mention]) -> list[MentionScore]: ...
+    def score(self, mentions: list[Mention]) -> dict[int, MentionScore]:
+        """Return scores keyed by index into `mentions`.
+
+        Keyed rather than positional on purpose: a discarded malformed batch
+        must not shift every later score onto the wrong player.
+        """
+        ...
 
 
 class NullScorer:
     """Stats-only runs. Implemented as a scorer so no branch is needed
     anywhere else in the pipeline."""
 
-    def score(self, mentions) -> list[MentionScore]:
-        return []
+    def score(self, mentions) -> dict[int, MentionScore]:
+        return {}
 
 
 PROMPT = """You are scoring football text for Fantasy Premier League decisions.
 
 For each numbered item, return one JSON object with:
+  index      - the item number given
   player_id  - the integer given
   sentiment  - float -1.0 (very bad news) to 1.0 (very good news)
   category   - one of: injury, rotation, form, hype
@@ -1819,16 +1841,16 @@ class ApiScorer:
         self.model = model
         self.batch_size = batch_size
 
-    def score(self, mentions: list[Mention]) -> list[MentionScore]:
+    def score(self, mentions: list[Mention]) -> dict[int, MentionScore]:
         import anthropic
 
         client = anthropic.Anthropic(api_key=self.api_key)
-        out: list[MentionScore] = []
+        out: dict[int, MentionScore] = {}
 
         for start in range(0, len(mentions), self.batch_size):
             batch = mentions[start : start + self.batch_size]
             listing = "\n".join(
-                f"{i}. player_id={m.player_id}: {m.item.body[:300]}"
+                f"{start + i}. player_id={m.player_id}: {m.item.body[:300]}"
                 for i, m in enumerate(batch)
             )
             response = client.messages.create(
@@ -1836,7 +1858,7 @@ class ApiScorer:
                 max_tokens=4096,
                 messages=[{"role": "user", "content": PROMPT + listing}],
             )
-            out += _parse_scores(response.content[0].text)
+            out.update(_parse_scores(response.content[0].text))
 
         return out
 
@@ -1851,37 +1873,38 @@ class SessionScorer:
         self.batch_path = Path(batch_path)
         self.scores_path = Path(scores_path)
 
-    def score(self, mentions: list[Mention]) -> list[MentionScore]:
+    def score(self, mentions: list[Mention]) -> dict[int, MentionScore]:
         self.batch_path.write_text(json.dumps([
-            {"player_id": m.player_id, "text": m.item.body[:300]} for m in mentions
+            {"index": i, "player_id": m.player_id, "text": m.item.body[:300]}
+            for i, m in enumerate(mentions)
         ], indent=2))
         if not self.scores_path.exists():
             log.warning("no scores at %s; treating run as stats-only", self.scores_path)
-            return []
+            return {}
         return _parse_scores(self.scores_path.read_text())
 
 
-def _parse_scores(text: str) -> list[MentionScore]:
+def _parse_scores(text: str) -> dict[int, MentionScore]:
     """Discard a malformed batch rather than guessing at scores."""
     try:
         start, end = text.index("["), text.rindex("]") + 1
         rows = json.loads(text[start:end])
     except (ValueError, json.JSONDecodeError) as exc:
         log.warning("discarding malformed score batch: %s", exc)
-        return []
+        return {}
 
-    out = []
+    out: dict[int, MentionScore] = {}
     for row in rows:
         try:
             category = row["category"]
             if category not in VALID_CATEGORIES:
                 continue
-            out.append(MentionScore(
+            out[int(row["index"])] = MentionScore(
                 player_id=int(row["player_id"]),
                 sentiment=max(-1.0, min(1.0, float(row["sentiment"]))),
                 category=category,
                 confidence=max(0.0, min(1.0, float(row["confidence"]))),
-            ))
+            )
         except (KeyError, TypeError, ValueError):
             continue
     return out
@@ -1889,13 +1912,16 @@ def _parse_scores(text: str) -> list[MentionScore]:
 
 def aggregate(
     mentions: list[Mention],
-    scores: list[MentionScore],
+    scores: dict[int, MentionScore],
     now: datetime,
     half_life_days: float = 7.0,
 ) -> dict[int, PlayerSentiment]:
     by_player: dict[int, dict] = {}
 
-    for mention, score in zip(mentions, scores):
+    for index, mention in enumerate(mentions):
+        score = scores.get(index)
+        if score is None:
+            continue
         age_days = (now - mention.item.published_at).total_seconds() / 86400
         weight = min(1.0, max(0.0, score.confidence)) * 0.5 ** (age_days / half_life_days)
         bucket = by_player.setdefault(
