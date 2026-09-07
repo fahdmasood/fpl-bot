@@ -253,10 +253,60 @@ fpl-bot/
   docs/superpowers/specs/
 ```
 
-## Open items for planning
+## Resolved parameters
 
-- Default projection horizon: 1 gameweek, or 3-5 to favour fixture runs?
-- Alias table: seed by hand, or generate from the player list and correct as
-  mismatches appear?
-- Per-run comment cap: what value keeps matchday cost sane without starving the
-  signal? Needs a measured run to set.
+Settled by research against public FPL repos and Reddit's own API docs; see
+`docs/research/2026-09-07-fpl-horizon-and-sentiment-volume.md` for sourcing.
+
+**Horizon = 3 gameweeks, `decay_base = 0.84`** (weights 1.00 / 0.84 / 0.71).
+`--horizon` stays configurable. The established public solvers default to 5-8,
+but they optimise a *sequence of transfers with banked free transfers*; this
+design makes a single-period squad pick, so their number would arrive without
+the machinery that justifies it. No public backtest compares horizons head to
+head — these are conventions, not measured optima, and ours should be revisited
+against real results.
+
+**The sentiment modifier applies to the GW+1 term only.** Availability
+forecasting degrades sharply with horizon while attacking-return forecasting
+does not, and sentiment here is an availability signal. Spreading ±15% evenly
+across three decayed weeks would leave GW+1 holding ~39% of the objective, so
+the guardrail would move the total by only ~6% — far weaker than intended.
+
+**Comment collection: 600 per run** (hard ceiling 1,000), from at most 8
+threads, score floor >= 3, age <= 36h, deduplicated on normalised text. At
+Haiku 4.5 rates this is ~$0.20/run, ~$15/season across two runs per gameweek —
+so cost is not the binding constraint; signal quality is. Instrument
+`comments_fetched`, `comments_after_filter`, `mentions_resolved`, and
+`unique_players_touched` per run, and move the cap to where
+`unique_players_touched` plateaus.
+
+Exclude per-match live and bonus threads. They generate the most comments and
+the least decision-relevant text — the fastest way to burn the cap on noise.
+Target the daily megathread, the current "How Did ____ Play?" thread, and
+listing posts above the score floor.
+
+## Reddit implementation constraints
+
+- **Rate limiting is not a real constraint here.** Reddit allows 100 queries
+  per minute per OAuth client, averaged over a 10-minute window; a run costs
+  ~15-25 calls. Do not build elaborate throttling — read `x-ratelimit-remaining`
+  off live responses (it is a *float*) and back off if it drops, rather than
+  hardcoding a limit against a window Reddit describes as "currently" 10 minutes.
+- **`/comments/{article}` is not a listing and has no `after`/`before` cursor.**
+  "Newest first, capped" must be implemented with `sort=new`, `depth`, and
+  selective `/api/morechildren` expansion — not a `limit`/`after` loop. Reddit
+  documents no maximum `limit` on this endpoint; verify empirically.
+- **User-Agent format is mandated**: `python:fpl-bot:v1.0.0 (by /u/<username>)`.
+  Generic UAs are heavily throttled.
+- **One client id.** Registering multiple accounts or apps for the same use
+  case is prohibited under Reddit's Responsible Builder Policy and grounds for
+  a permanent block.
+
+## Testing addendum
+
+Multi-gameweek projections must **freeze lag features at the deadline**. When
+projecting GW+2 and beyond, the lagged inputs cannot use those weeks' own
+results; each subsequent week reuses the first week's lag values. Getting this
+wrong leaks future data into the backtest and produces a model that looks
+excellent and performs badly. The end-to-end test asserts that a projection for
+GW+3 is unchanged when GW+1 and GW+2 results are mutated in the fixture.
