@@ -202,6 +202,7 @@ def collect(settings: Settings, reddit=None, now: datetime | None = None):
 
     kept = filter_items(raw, settings, now)
     stats = {
+        "collection_attempted": True,
         "items_fetched": len(raw),
         "items_after_filter": len(kept),
         "sources_used": sources_used,

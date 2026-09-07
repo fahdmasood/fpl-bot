@@ -99,7 +99,15 @@ def _degradation_notes(stats: dict) -> list[str]:
     notes: list[str] = []
     absent = stats.get("sources_absent", [])
 
-    if "news-rss" in absent:
+    if not stats.get("collection_attempted", True):
+        # Nothing was collected because nothing would have scored it. Saying
+        # the feeds "could not be read" would send someone debugging feeds
+        # that are working perfectly well.
+        notes.append(
+            "No sentiment scorer is configured, so no news was collected and "
+            "the squad was built from statistics alone."
+        )
+    elif "news-rss" in absent:
         notes.append(
             "The news feeds could not be read this run, so the squad was "
             "built from statistics alone with no sentiment applied."

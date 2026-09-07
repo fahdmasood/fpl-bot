@@ -25,35 +25,66 @@ def test_pipeline_is_deterministic(client, tmp_path):
     assert [p["id"] for p in a["squad"]] == [p["id"] for p in b["squad"]]
 
 
-def test_later_gameweek_projections_do_not_use_earlier_results(client, tmp_path):
-    """Lag features must be frozen at the deadline.
+def test_the_projection_harness_can_detect_a_change_at_all(client, tmp_path):
+    """Positive control for the freeze lag test below.
 
-    A projection for GW+3 may not change when GW+1 results are mutated,
-    because at decision time those results do not exist. Getting this wrong
-    makes a backtest look excellent and the live bot perform badly.
+    That test asserts a projection does NOT move. An assertion of absence is
+    worthless until you have shown the harness can see a change at all. An
+    earlier version mutated `form`, which the model never reads, so it could
+    not have failed no matter how badly the model leaked.
     """
     from fplbot.projection import project_all
 
     settings = Settings(cache_dir=tmp_path)
     players = client.players()
-    next_gw = client.next_gameweek().id
     common = dict(teams=client.teams(), fixtures=client.fixtures(),
-                  next_gw_id=next_gw, settings=settings)
+                  next_gw_id=client.next_gameweek().id, settings=settings)
 
     base = project_all(players=players, **common)
+    target = max(players, key=lambda p: p.expected_goals)
+    bumped = [copy.replace(p, expected_goals=p.expected_goals + 5.0)
+              if p.id == target.id else p for p in players]
+    after = project_all(players=bumped, **common)
 
-    mutated = []
-    for p in players:
-        # Simulate GW+1 having happened differently.
-        mutated.append(copy.replace(p, form=p.form + 5.0) if p.minutes else p)
+    assert after[target.id].total > base[target.id].total, (
+        "mutating a field the model reads did not change the projection, so "
+        "the freeze lag test below cannot be trusted"
+    )
 
-    after = project_all(players=mutated, **common)
 
-    changed = [pid for pid in base
-               if abs(base[pid].per_gameweek[2] - after[pid].per_gameweek[2]) > 1e-9]
-    assert not changed, (
-        f"{len(changed)} GW+3 projections moved when GW+1 form changed; "
-        "lag features are leaking future results"
+def test_every_gameweek_in_the_horizon_uses_the_same_frozen_inputs(client, tmp_path):
+    """Lag features are frozen at the deadline.
+
+    At decision time no gameweek in the horizon has been played, so all of
+    them must be projected from the same season to date inputs. If a later
+    gameweek responded differently to a change than the first one, something
+    would be recomputing from results that do not exist yet, and a backtest
+    would look excellent while the live bot underperformed.
+
+    Checked by ratio rather than by equality, because the raw values differ
+    legitimately across gameweeks through decay and fixture difficulty.
+    """
+    from fplbot.projection import project_all
+
+    settings = Settings(cache_dir=tmp_path)
+    players = client.players()
+    common = dict(teams=client.teams(), fixtures=client.fixtures(),
+                  next_gw_id=client.next_gameweek().id, settings=settings)
+
+    base = project_all(players=players, **common)
+    target = max(players, key=lambda p: p.expected_goals)
+    bumped = [copy.replace(p, expected_goals=p.expected_goals + 5.0)
+              if p.id == target.id else p for p in players]
+    after = project_all(players=bumped, **common)
+
+    ratios = [
+        a / b
+        for b, a in zip(base[target.id].per_gameweek, after[target.id].per_gameweek)
+        if b > 0
+    ]
+    assert len(ratios) >= 2, "need at least two scoring gameweeks to compare"
+    assert max(ratios) - min(ratios) < 1e-9, (
+        f"gameweeks responded differently to the same input change: {ratios}"
     )
 
 

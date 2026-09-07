@@ -11,7 +11,7 @@ from pathlib import Path
 from fplbot.config import Settings
 from fplbot.fetch import FplClient
 from fplbot.news import collect
-from fplbot.optimize import pick_squad
+from fplbot.optimize import InfeasibleSquad, pick_squad
 from fplbot.projection import project_all
 from fplbot.report import build_report, render_html
 from fplbot.sentiment import (ApiScorer, NullScorer, SessionScorer, aggregate,
@@ -41,6 +41,8 @@ def run(settings: Settings, client: FplClient, scorer, entry_id: int | None = No
             "items_fetched": 0, "items_after_filter": 0,
             "sources_used": [], "sources_absent": ["news-rss", "reddit"],
             "reddit_available": False, "reddit_status": "not_configured",
+            # Distinguishes "not attempted" from "attempted and failed".
+            "collection_attempted": False,
         }
     else:
         items, stats = collect(settings, now=now)
@@ -100,8 +102,15 @@ def main(argv=None) -> int:
         log.warning("no scorer configured; producing a stats-only squad")
         scorer = NullScorer()
 
-    report = run(settings, _build_client(settings), scorer, args.team_id,
-                 free_transfers=args.free_transfers)
+    try:
+        report = run(settings, _build_client(settings), scorer, args.team_id,
+                     free_transfers=args.free_transfers)
+    except InfeasibleSquad as exc:
+        # The solver could not build a legal squad. Nearly always this means
+        # the projections are broken rather than the constraints, so say the
+        # binding constraint rather than printing a traceback.
+        print(f"Could not build a legal squad: {exc}")
+        return 1
 
     out = Path(args.output)
     out.with_suffix(".json").write_text(json.dumps(report, indent=2))

@@ -19,6 +19,12 @@ never touches anyone's team.
    £100.0m budget, plus a starting XI and captain.
 5. Writes a private report before each deadline.
 
+Sentiment scoring is not on by default. It requires either an
+`ANTHROPIC_API_KEY` or a `--batch` run scored by a Claude session; with
+neither set, the CLI skips scoring entirely and builds the squad from
+statistics alone, marking the report as reduced coverage rather than
+silently pretending sentiment was considered.
+
 ## Data use
 
 **Read-only.** Nothing is posted, commented, voted on, moderated, or messaged.
