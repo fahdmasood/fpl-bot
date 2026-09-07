@@ -11,7 +11,11 @@ import statistics
 from fplbot.config import SCORING, Settings
 from fplbot.models import Fixture, Player, PlayerSentiment, Projection, Team
 
-MINUTES_FLOOR = 270  # three full matches; used for selection share, not rates
+# Minutes threshold for inclusion in the position median pools. Set to two
+# full matches rather than three: at three, only players who are never
+# substituted qualify, which biases the pools toward goalkeepers and centre
+# backs and drags the attacking priors down.
+MEDIAN_POOL_MINUTES = 180
 
 # Prior weight in matches when regressing a rate toward its cohort mean.
 # Chosen by measurement, not feel: K=2 lets a clean-sheet probability breach
@@ -54,7 +58,7 @@ def position_medians(players: list[Player]) -> dict[str, dict[str, float]]:
     out: dict[str, dict[str, float]] = {}
     for position in ("GKP", "DEF", "MID", "FWD"):
         pool = [p for p in players
-                if p.position == position and p.minutes >= MINUTES_FLOOR]
+                if p.position == position and p.minutes >= MEDIAN_POOL_MINUTES]
         if not pool:
             out[position] = {"xg": 0.0, "xa": 0.0, "bps": 0.0, "dc": 0.0}
             continue
@@ -99,9 +103,22 @@ def team_xgc_per_90(players: list[Player]) -> dict[int, float]:
 
 
 def minutes_probability(
-    player: Player, sentiment: PlayerSentiment | None = None, cap: float = 0.15
+    player: Player,
+    games_played: int,
+    sentiment: PlayerSentiment | None = None,
+    cap: float = 0.15,
 ) -> float:
     """Probability the player is on the pitch, in [0, 1].
+
+    Measured as the share of available minutes actually played. A player who
+    starts every match but is routinely withdrawn on seventy minutes is a
+    nailed starter, not a rotation risk.
+
+    An earlier version compared raw minutes to a three full match threshold
+    and assigned a flat one half to anyone below it. That put 84 of the 163
+    players who had started every match into the same bucket as fringe
+    squad players, purely because they had been substituted at some point.
+    A player on 269 minutes scored half of one on 270.
 
     The API's own injury flag outranks the internet: a player who is not
     available cannot be talked back onto the pitch by sentiment.
@@ -110,28 +127,17 @@ def minutes_probability(
     if base == 0.0:
         return 0.0
 
-    if player.minutes >= MINUTES_FLOOR:
-        share = min(1.0, player.minutes / (player.starts * 90) if player.starts else 0.7)
+    if games_played > 0:
+        share = min(1.0, player.minutes / (games_played * 90))
     else:
-        share = 0.5
+        # Nothing played yet, so nothing to measure. Assume a squad player.
+        share = 0.7
     base *= share
 
     if sentiment is not None:
         base *= 1 + cap * max(-1.0, min(1.0, sentiment.availability_signal))
 
     return max(0.0, min(1.0, base))
-
-
-def clean_sheet_probability(team_xgc90: float, difficulty: int) -> float:
-    """Poisson probability of conceding zero, given the club's own xGC.
-
-    P(0 goals) = exp(-expected_goals_conceded). Scaling the club's own rate by
-    fixture difficulty means a weak defence facing an easy fixture and a strong
-    defence facing a hard one are ranked on their actual quality, not on the
-    difficulty digit alone.
-    """
-    adjusted = team_xgc90 * DIFFICULTY_MULTIPLIER.get(difficulty, 1.0)
-    return math.exp(-max(0.05, adjusted))
 
 
 def poisson_at_least(threshold: int, mean: float) -> float:
@@ -151,6 +157,18 @@ def poisson_at_least(threshold: int, mean: float) -> float:
         term *= mean / k
         cumulative += term
     return max(0.0, min(1.0, 1.0 - cumulative))
+
+
+def clean_sheet_probability(team_xgc90: float, difficulty: int) -> float:
+    """Poisson probability of conceding zero, given the club's own xGC.
+
+    P(0 goals) = exp(-expected_goals_conceded). Scaling the club's own rate by
+    fixture difficulty means a weak defence facing an easy fixture and a strong
+    defence facing a hard one are ranked on their actual quality, not on the
+    difficulty digit alone.
+    """
+    adjusted = team_xgc90 * DIFFICULTY_MULTIPLIER.get(difficulty, 1.0)
+    return math.exp(-max(0.05, adjusted))
 
 
 def bonus_estimate(player: Player, prior_bps90: float) -> float:
@@ -222,6 +240,9 @@ def project_all(
     weights = settings.decay_weights
     medians = position_medians(players)
     team_xgc = team_xgc_per_90(players)
+    # Gameweeks completed so far. Used to judge what share of the available
+    # minutes each player has actually been on the pitch for.
+    games_played = max(0, next_gw_id - 1)
 
     fixtures_by_gw: dict[int, list[Fixture]] = {}
     for f in fixtures:
@@ -238,7 +259,8 @@ def project_all(
             # Sentiment applies to GW+1 only. Spreading it across the decayed
             # horizon would dilute the +/-15% guardrail to roughly +/-6%.
             sig_for_gw = sig if offset == 0 else None
-            mp = minutes_probability(player, sig_for_gw, settings.sentiment_cap)
+            mp = minutes_probability(player, games_played, sig_for_gw,
+                                     settings.sentiment_cap)
             form_mult = 1.0
             if sig_for_gw is not None:
                 form_mult = 1 + settings.sentiment_cap * max(

@@ -64,11 +64,11 @@ def test_sentiment_modifier_respects_the_cap():
         "starts": 10,
     }
     player = Player.from_api(raw)
-    neutral = minutes_probability(player, sentiment=None)
+    neutral = minutes_probability(player, games_played=3, sentiment=None)
     best = minutes_probability(
-        player, PlayerSentiment(1, availability_signal=1.0, form_signal=0.0, volume=5))
+        player, 3, PlayerSentiment(1, availability_signal=1.0, form_signal=0.0, volume=5))
     worst = minutes_probability(
-        player, PlayerSentiment(1, availability_signal=-1.0, form_signal=0.0, volume=5))
+        player, 3, PlayerSentiment(1, availability_signal=-1.0, form_signal=0.0, volume=5))
     assert best <= neutral * 1.15 + 1e-9
     assert worst >= neutral * 0.85 - 1e-9
 
@@ -85,8 +85,37 @@ def test_sentiment_cannot_rescue_a_flagged_player():
     }
     player = Player.from_api(raw)
     hyped = minutes_probability(
-        player, PlayerSentiment(2, availability_signal=1.0, form_signal=1.0, volume=50))
+        player, 3, PlayerSentiment(2, availability_signal=1.0, form_signal=1.0, volume=50))
     assert hyped == 0.0
+
+
+def test_a_substituted_starter_is_not_treated_as_a_rotation_risk():
+    """A player who starts every match but comes off on seventy minutes is
+    nailed on. Judging raw minutes against a three full match threshold put
+    half of all regular starters in the same bucket as fringe players.
+    """
+    from fplbot.models import Player
+    raw = {
+        "id": 1, "web_name": "X", "element_type": 4, "team": 1, "now_cost": 90,
+        "status": "a", "chance_of_playing_next_round": None, "minutes": 243,
+        "form": "5.0", "selected_by_percent": "10", "expected_goals": "2.3",
+        "expected_assists": "0.1", "expected_goals_conceded": "3.0",
+        "defensive_contribution_per_90": "1.0", "ict_index": "80", "bps": 200,
+        "starts": 3,
+    }
+    started_every_game = Player.from_api(raw)
+    played_every_minute = Player.from_api({**raw, "minutes": 270})
+    fringe = Player.from_api({**raw, "minutes": 60, "starts": 0})
+
+    nailed = minutes_probability(started_every_game, games_played=3)
+    ever_present = minutes_probability(played_every_minute, games_played=3)
+    bench = minutes_probability(fringe, games_played=3)
+
+    assert nailed > 0.85, nailed
+    assert ever_present >= nailed
+    assert bench < 0.35, bench
+    # One minute of football must not halve a projection.
+    assert ever_present - nailed < 0.15
 
 
 def test_a_strong_defence_beats_a_weak_one_on_clean_sheets():
