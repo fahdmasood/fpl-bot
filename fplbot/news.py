@@ -59,7 +59,11 @@ def filter_items(items: list[NewsItem], settings: Settings, now: datetime) -> li
             continue
         if it.published_at < cutoff:
             continue
-        key = normalise(it.body)[:200]
+        # Key on the whole normalised body, not a prefix. Truncating to a
+        # fixed prefix merges distinct stories that share a syndicated opening
+        # sentence, and silently discarding real evidence is worse than
+        # counting one claim twice.
+        key = normalise(it.body)
         if key in seen:
             continue
         seen.add(key)
@@ -176,18 +180,25 @@ def collect(settings: Settings, reddit=None, now: datetime | None = None):
 
     have_credentials = bool(settings.reddit_client_id and settings.reddit_client_secret)
     reddit_available = False
+    # "Not configured" and "configured but broken" are different situations:
+    # the first is the expected default, the second is worth alerting on.
+    # Collapsing both into one absent-source string hides that from anyone
+    # reading the run's stats afterwards.
     if have_credentials or reddit is not None:
         try:
             raw += RedditCollector(settings, reddit).collect()
             sources_used.append("reddit")
             reddit_available = True
+            reddit_status = "ok"
         except Exception as exc:
             log.warning("Reddit collection failed: %s", exc)
             sources_absent.append("reddit")
+            reddit_status = f"failed: {type(exc).__name__}"
     else:
         # Expected default: Reddit requires approved Data API access.
         log.info("no Reddit credentials; running on news feeds alone")
         sources_absent.append("reddit")
+        reddit_status = "not_configured"
 
     kept = filter_items(raw, settings, now)
     stats = {
@@ -196,5 +207,6 @@ def collect(settings: Settings, reddit=None, now: datetime | None = None):
         "sources_used": sources_used,
         "sources_absent": sources_absent,
         "reddit_available": reddit_available,
+        "reddit_status": reddit_status,
     }
     return kept, stats

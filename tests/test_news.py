@@ -73,4 +73,31 @@ def test_collect_without_reddit_reports_it_absent_not_failed(monkeypatch):
     items, stats = collect(Settings(cache_dir="/tmp/x"), now=NOW)
     assert stats["reddit_available"] is False
     assert "reddit" in stats["sources_absent"]
+    assert stats["reddit_status"] == "not_configured"
     assert items, "news-only run must still produce items"
+
+
+def test_a_broken_reddit_is_distinguishable_from_an_absent_one(monkeypatch):
+    """Both end up in sources_absent, but "never set up" and "set up and
+    broken" need different responses from whoever reads the run."""
+    import fplbot.news as news
+
+    class Boom:
+        def subreddit(self, name):
+            raise RuntimeError("401 Unauthorized")
+
+    monkeypatch.setattr(news.RssCollector, "collect", lambda self: [item()])
+    items, stats = collect(Settings(cache_dir="/tmp/x"), reddit=Boom(), now=NOW)
+    assert stats["reddit_available"] is False
+    assert stats["reddit_status"].startswith("failed:")
+    assert items, "a broken Reddit must not lose the news items"
+
+
+def test_distinct_stories_sharing_an_opening_are_not_merged():
+    """Syndicated copy shares lead sentences. Keying dedupe on a prefix would
+    merge two different stories and throw away real evidence."""
+    lead = "The Premier League returns this weekend after the international break. "
+    a = item(body=lead + "Saka is expected to start against Chelsea.")
+    b = item(source="sky", body=lead + "Haaland has been ruled out with a knock.")
+    kept = filter_items([a, b], Settings(cache_dir="/tmp/x"), NOW)
+    assert len(kept) == 2, "two different stories were merged as duplicates"
