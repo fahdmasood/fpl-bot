@@ -251,7 +251,7 @@ git commit -m "feat: project scaffold, settings, and FPL scoring table"
 
 **Interfaces:**
 - Consumes: `POSITION_BY_ELEMENT_TYPE` from `fplbot.config`
-- Produces: frozen dataclasses `Team`, `Player`, `Fixture`, `Gameweek`, `NewsItem`, `Mention`, `PlayerSentiment`, `Projection`, `Squad`, plus `Player.from_api(raw: dict) -> Player` and `Player.price_m -> float`.
+- Produces: frozen dataclasses `Team`, `Player`, `Fixture`, `Gameweek`, `NewsItem`, `Mention`, `MentionScore`, `PlayerSentiment`, `Projection`, `Squad`, plus `Player.from_api(raw: dict) -> Player` and `Player.price_m -> float`.
 
 **Background the implementer needs:** `now_cost` is an integer in tenths of a million; keep it an integer everywhere and only convert for display. `status` is a single character: `a` available, `d` doubtful, `i` injured, `s` suspended, `u` unavailable, `n` on loan / not in squad. `chance_of_playing_next_round` is an integer percentage or `None` — and `None` means "no news", which is good news, not missing data. Getting that backwards benches every fit player.
 
@@ -1977,7 +1977,7 @@ git commit -m "feat: mention resolution, scorer implementations, and aggregation
 - Test: `tests/test_report.py`
 
 **Interfaces:**
-- Consumes: `Player`, `Projection`, `Squad`, `PlayerSentiment` from `fplbot.models`
+- Consumes: `Player`, `Projection`, `Squad`, `PlayerSentiment`, `Gameweek` from `fplbot.models`
 - Produces: `build_report(squad, players, projections, sentiment, stats, gameweek, current_squad=None) -> dict`; `transfer_diff(current_ids, target_ids, players, projections) -> list[dict]`; `render_html(report) -> str`
 
 **Background the implementer needs:** The JSON is the source of truth and the HTML is a view of it. Keep every number in the JSON so a later change of reporting destination needs no new computation.
@@ -2348,7 +2348,14 @@ def run(settings: Settings, client: FplClient, scorer, entry_id: int | None = No
                               sentiment=sentiment)
     squad = pick_squad(players, projections, rules)
 
-    current = client.entry_picks(entry_id, gameweek.id - 1) if entry_id else None
+    current = None
+    if entry_id and gameweek.id > 1:
+        try:
+            current = client.entry_picks(entry_id, gameweek.id - 1)
+        except Exception as exc:
+            # GW1 has no prior squad, and a private or wrong id 404s. Neither
+            # is worth aborting an otherwise good run for.
+            log.warning("could not read entry %s: %s", entry_id, exc)
     return build_report(squad, players, projections, sentiment, stats,
                         gameweek, current)
 
