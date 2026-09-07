@@ -126,9 +126,53 @@ def _degradation_notes(stats: dict) -> list[str]:
     return notes
 
 
+HIT_COST = 4  # points charged for each transfer beyond your free ones
+
+
+def annotate_transfer_plan(moves: list[dict], free_transfers: int) -> list[dict]:
+    """Mark which moves your free transfers cover and which are worth a hit.
+
+    A squad differs from the optimum by however many players it differs by,
+    often ten or more. Listing all of them is a wish list, not advice. You get
+    one free transfer per gameweek, banked up to five, and every transfer
+    beyond that costs four points.
+
+    Moves are already sorted by projected gain, so the free transfers go to
+    the best ones. Each move past that is judged on its own: a gain larger
+    than the four point hit is worth taking, a smaller one is not.
+
+    Note the comparison is slightly generous to taking hits, because the gain
+    is spread across the projection horizon while the hit is charged once.
+    """
+    planned = []
+    for rank, move in enumerate(moves):
+        free = rank < free_transfers
+        hit = 0 if free else HIT_COST
+        move = {
+            **move,
+            "uses_free_transfer": free,
+            "hit_cost": hit,
+            "net_gain": round(move["gain"] - hit, 2),
+        }
+        move["recommended"] = (
+            move["affordable"] and (free or move["net_gain"] > 0)
+        )
+        planned.append(move)
+    return planned
+
+
 def build_report(squad: Squad, players, projections, sentiment, stats,
-                 gameweek: Gameweek, current_squad=None) -> dict:
+                 gameweek: Gameweek, current_squad=None,
+                 free_transfers: int = 1) -> dict:
     by_id = {p.id: p for p in players}
+
+    transfers = (
+        annotate_transfer_plan(
+            transfer_diff(current_squad, squad.players, players, projections),
+            free_transfers,
+        )
+        if current_squad else []
+    )
 
     reasons = _degradation_notes(stats)
 
@@ -151,13 +195,15 @@ def build_report(squad: Squad, players, projections, sentiment, stats,
         "squad": [_player_row(by_id[i], projections[i], sentiment.get(i))
                   for i in squad.players],
         "starting_xi": squad.starting_xi,
-        "transfers": (
-            transfer_diff(current_squad, squad.players, players, projections)
-            if current_squad else []
-        ),
+        "transfers": transfers,
+        "transfers_recommended": [m for m in transfers if m["recommended"]],
+        "free_transfers": free_transfers,
         "transfers_note": (
-            "Moves are paired within position and assume no money in the bank, "
-            "since the bot does not know your actual balance."
+            f"You have {free_transfers} free transfer(s). Moves beyond that "
+            f"cost {HIT_COST} points each and are only recommended when the "
+            "projected gain exceeds the hit. Pairing is within position, and "
+            "affordability assumes no money in the bank, since the bot does "
+            "not know your actual balance."
             if current_squad else ""
         ),
     }
@@ -208,14 +254,17 @@ def render_html(report: dict) -> str:
             f"<td>{esc(m['in']['name'])} (£{esc(m['in']['price_m'])}m, "
             f"{esc(m['in']['projected_points'])})</td>"
             f"<td>{esc(m['gain'])}</td>"
-            f"<td>{'yes' if m.get('affordable') else 'no'}</td></tr>"
+            f"<td>{'free' if m['uses_free_transfer'] else str(m['hit_cost']) + ' pts'}</td>"
+            f"<td>{esc(m['net_gain'])}</td>"
+            f"<td>{'yes' if m['recommended'] else 'no'}</td></tr>"
             for m in report["transfers"]
         )
         transfers = (
             "<h2>Suggested transfers</h2>"
             f"<p>{esc(report.get('transfers_note', ''))}</p>"
             "<table><tr><th>Pos</th><th>Out</th><th>In</th><th>Gain</th>"
-            f"<th>Affordable</th></tr>{moves}</table>"
+            "<th>Cost</th><th>Net</th><th>Do it</th>"
+            f"</tr>{moves}</table>"
         )
 
     coverage = (

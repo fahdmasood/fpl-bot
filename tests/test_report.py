@@ -2,7 +2,7 @@
 from fplbot.config import Settings
 from fplbot.optimize import pick_squad
 from fplbot.projection import project_all
-from fplbot.report import build_report, render_html, transfer_diff
+from fplbot.report import annotate_transfer_plan, build_report, render_html, transfer_diff
 
 
 def _report(client, stats=None):
@@ -156,7 +156,8 @@ def test_html_shows_reasoning_and_transfers(client):
                        if p.id not in current
                        and by_id[p.id].position == by_id[target].position)
     current[0] = replacement
-    report["transfers"] = transfer_diff(current, squad.players, players, projections)
+    moves = transfer_diff(current, squad.players, players, projections)
+    report["transfers"] = annotate_transfer_plan(moves, free_transfers=1)
     report["transfers_note"] = "test"
 
     html_out = render_html(report)
