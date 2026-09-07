@@ -1,0 +1,2 @@
+[console_scripts]
+fplbot = fplbot.cli:main

@@ -26,8 +26,8 @@ for it, and makes no transfers.
    move the user's real squad toward the optimum.
 4. It runs twice per gameweek without being asked, and the report lands
    somewhere the user will see it.
-5. A failure in any sentiment source degrades the run — to titles-only, or to
-   stats-only — rather than failing it, and the report says which.
+5. A failure in any sentiment source degrades the run rather than failing it,
+   and the report names which sources were used and which were absent.
 
 ## Non-goals
 
@@ -56,48 +56,66 @@ hardcoded. At time of writing the next deadline is GW4,
 
 ### Sentiment sources
 
-Comment-level volume is a requirement, not an upgrade. Post titles alone are a
-thin and lagging signal; the useful content — "he's been carrying a knock all
-week", "Pep hinted at rotation" — appears in comment threads, often hours
-before it reaches a headline.
+The signal worth having is **early availability news** — injuries, knocks,
+rotation hints from press conferences — reaching us before the statistical feed
+absorbs it. Community chatter adds volume around that signal; it rarely adds
+signal of its own.
 
-**Reddit API (required).** A free Reddit OAuth "script" app, created once at
-`reddit.com/prefs/apps`, gives read access to r/FantasyPL listings *and* their
-comment trees under the client-credentials grant. No user account is exposed;
-the bot only reads public content. Credentials live in `REDDIT_CLIENT_ID` and
-`REDDIT_CLIENT_SECRET`.
+**News RSS is the primary source.** Six feeds, all verified returning items on
+2026-09-07:
 
-Comment volume is large, so the collector filters before anything reaches the
-language model:
+| Source | Feed | Tier |
+|---|---|---|
+| BBC Sport | `feeds.bbci.co.uk/sport/football/rss.xml` | high |
+| Guardian | `theguardian.com/football/rss` | high |
+| Sky Sports | `skysports.com/rss/12040` | high |
+| talkSPORT | `talksport.com/football/feed/` | low |
+| Metro | `metro.co.uk/sport/football/feed/` | low |
+| Mirror | `mirror.co.uk/sport/football/?service=rss` | low |
 
-- Only threads that matter: the daily/matchday discussion threads, injury and
-  press-conference threads, and posts above a score threshold.
-- Only comments above a small score floor, discarding the long tail of
-  one-word replies.
-- Deduplicated by normalised text, since the same claim gets copy-pasted across
-  threads and would otherwise be double-counted as independent evidence.
-- Capped per run, newest first, so cost stays bounded on a busy matchday.
+Sources carry a **trust tier** that multiplies a mention's confidence during
+aggregation: high-tier 1.0, low-tier 0.6. The tabloid feeds break real team news
+often enough to be worth reading and speculate often enough to be worth
+discounting. ESPN's soccer feed returns an empty document and Football365's
+returns 404; both are excluded rather than left in to fail silently.
 
-**RSS (supporting).** BBC Sport football and Guardian football feeds, for
-injury reports and press-conference coverage from outside the community bubble.
-Both verified working unauthenticated.
+**Reddit is optional and gated on approval.** Reddit's Responsible Builder
+Policy (updated 2026-06-05) states: *"Approval is required: You must request
+access and get explicit approval before accessing any Reddit data through our
+API"*, and *"Apps must register and create a developer profile."* Creating a
+script app is therefore not sufficient. The route for a use case Devvit does not
+cover is a developer access ticket.
 
-**Fallback.** If the Reddit credentials are missing or the API errors, the
-collector falls back to `https://www.reddit.com/r/FantasyPL/hot.rss` and
-`/new.rss` — verified working without auth, but titles only. A run in this
-state is explicitly labelled as reduced-coverage in the report, because the
-sentiment signal is meaningfully weaker without comments.
+Until approval lands, the Reddit collector stays dormant. When
+`REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` are present it activates and adds
+comment-level volume; the rest of the pipeline is unchanged either way. This is
+why the collector was designed behind an interface rather than inlined.
 
-Note: `reddit.com/r/.../hot.json` returns 403 to non-browser clients as of
-2026-09-07, and `old.reddit.com` 302-redirects. The `.rss` path is the working
-unauthenticated route. Do not reintroduce the `.json` path.
+Two policy constraints bind the design regardless of approval:
+
+- **No AI training on Reddit data.** We score mentions with an LLM at inference
+  time and never retain a corpus for training. Nothing in this system fine-tunes
+  on collected text, and nothing should be added that does.
+- **No inferring characteristics about Redditors.** Sentiment is attributed to
+  *footballers*, never to the commenter. The pipeline stores no author field —
+  `NewsItem` deliberately has no `author`, and none should be added.
+
+`reddit.com/r/.../hot.json` returns 403 to non-browser clients and
+`old.reddit.com` 302-redirects; `.rss` is the only unauthenticated route, and it
+yields titles only. It is not used as a silent fallback: a run either has Reddit
+API access or reports Reddit coverage as absent.
 
 X/Twitter is excluded: the API pricing does not justify the marginal signal.
 
 ## Prerequisites
 
-One manual step before the first run: create a free Reddit script app at
-`reddit.com/prefs/apps` and put the client ID and secret in `.env`.
+No credentials are required to run. The six news feeds are public and
+unauthenticated.
+
+Reddit is optional: register an app at `developers.reddit.com/app-registration`
+and request developer access via Reddit's ticket form, then put the client ID
+and secret in `.env`. The bot runs without them and reports Reddit coverage as
+absent.
 
 Nothing else is required for the scheduled path, which scores sentiment inside
 the Claude session. An `ANTHROPIC_API_KEY` is only needed to run the CLI
@@ -218,8 +236,8 @@ a Discord or Slack webhook later is a change to the routine, not the package.
 ## Error handling
 
 - FPL API unreachable → use cache, mark the report stale with the cache age.
-- Reddit credentials missing or rejected → fall back to the RSS route and
-  label the run reduced-coverage.
+- Reddit credentials missing or not yet approved → run on news feeds alone and
+  report Reddit coverage as absent. This is the expected default, not an error.
 - A sentiment source fails → continue with the rest; the report names what was
   missing.
 - All sentiment fails → stats-only run, clearly labelled. Still a valid squad.

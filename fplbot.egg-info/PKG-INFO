@@ -1,0 +1,10 @@
+Metadata-Version: 2.4
+Name: fplbot
+Version: 0.1.0
+Requires-Python: >=3.13
+Requires-Dist: requests>=2.32
+Requires-Dist: feedparser>=6.0
+Requires-Dist: praw>=7.7
+Requires-Dist: pulp>=2.8
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"

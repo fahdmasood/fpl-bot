@@ -1,0 +1,10 @@
+pyproject.toml
+fplbot/__init__.py
+fplbot/config.py
+fplbot.egg-info/PKG-INFO
+fplbot.egg-info/SOURCES.txt
+fplbot.egg-info/dependency_links.txt
+fplbot.egg-info/entry_points.txt
+fplbot.egg-info/requires.txt
+fplbot.egg-info/top_level.txt
+tests/test_config.py
