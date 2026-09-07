@@ -2133,6 +2133,28 @@ def test_aggregate_decays_old_mentions():
     assert abs(stale) < abs(fresh)
 
 
+def test_volume_does_not_inflate_the_signal():
+    """Ten people repeating a claim is not ten pieces of evidence. Volume
+    measures popularity, not quality, and must never reach the model."""
+    players = [make_player(1, "Saka")]
+    one = resolve_mentions([item("Saka has a knock")], players)
+    many = resolve_mentions([item("Saka has a knock")] * 10, players)
+    score = MentionScore(1, sentiment=-0.8, category="injury", confidence=0.9)
+    single = aggregate(one, {0: score}, NOW)[1].availability_signal
+    repeated = aggregate(many, {i: score for i in range(10)}, NOW)[1].availability_signal
+    assert abs(single - repeated) < 1e-9, (single, repeated)
+
+
+def test_a_low_confidence_mention_moves_the_signal_less():
+    players = [make_player(1, "Saka")]
+    mentions = resolve_mentions([item("Saka has a knock")], players)
+    confident = aggregate(
+        mentions, {0: MentionScore(1, -1.0, "injury", 1.0)}, NOW)[1].availability_signal
+    unsure = aggregate(
+        mentions, {0: MentionScore(1, -1.0, "injury", 0.2)}, NOW)[1].availability_signal
+    assert abs(unsure) < abs(confident)
+
+
 def test_aggregate_signals_stay_in_range():
     players = [make_player(1, "Saka")]
     mentions = resolve_mentions([item("Saka has a knock")] * 1, players)
@@ -2359,7 +2381,8 @@ def aggregate(
                   * 0.5 ** (age_days / half_life_days))
         bucket = by_player.setdefault(
             mention.player_id,
-            {"avail": 0.0, "avail_w": 0.0, "form": 0.0, "form_w": 0.0,
+            {"avail": 0.0, "avail_w": 0.0, "avail_max": 0.0,
+             "form": 0.0, "form_w": 0.0, "form_max": 0.0,
              "volume": 0, "evidence": []},
         )
         bucket["volume"] += 1
@@ -2368,19 +2391,37 @@ def aggregate(
         if score.category in AVAILABILITY_CATEGORIES:
             bucket["avail"] += clamped * weight
             bucket["avail_w"] += weight
+            bucket["avail_max"] = max(bucket["avail_max"], weight)
         else:
             bucket["form"] += clamped * weight
             bucket["form_w"] += weight
+            bucket["form_max"] = max(bucket["form_max"], weight)
 
         if len(bucket["evidence"]) < 3:
             bucket["evidence"].append(mention.item.body[:160])
+
+    def _signal(total: float, weight_sum: float, best_weight: float) -> float:
+        """Weighted mean, attenuated by the strength of the best evidence.
+
+        The mean alone gives direction without letting volume matter: ten
+        mentions of the same claim say no more than one. But a mean also
+        cancels the decay for a lone mention — (s x w) / w = s — so a
+        fortnight-old "he has a knock" would move the projection exactly as
+        much as this morning's. Multiplying by the single best weight (its
+        confidence x source trust x recency) restores that attenuation
+        without reintroducing volume: adding more mentions cannot push the
+        signal past what the strongest one supports.
+        """
+        if weight_sum <= 0:
+            return 0.0
+        return (total / weight_sum) * min(1.0, best_weight)
 
     out: dict[int, PlayerSentiment] = {}
     for player_id, b in by_player.items():
         out[player_id] = PlayerSentiment(
             player_id=player_id,
-            availability_signal=b["avail"] / b["avail_w"] if b["avail_w"] else 0.0,
-            form_signal=b["form"] / b["form_w"] if b["form_w"] else 0.0,
+            availability_signal=_signal(b["avail"], b["avail_w"], b["avail_max"]),
+            form_signal=_signal(b["form"], b["form_w"], b["form_max"]),
             # Volume is reported, never modelled: it measures popularity,
             # not quality, and would bias toward already-owned players.
             volume=b["volume"],
