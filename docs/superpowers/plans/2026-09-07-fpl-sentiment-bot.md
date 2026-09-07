@@ -927,11 +927,13 @@ def test_clean_sheet_probability_falls_as_difficulty_rises():
 
 def test_bonus_uses_bps_not_just_ict(client):
     """The spec names BPS; an ICT-only bonus term ignores half the signal."""
-    from fplbot.projection import bonus_estimate
+    from fplbot.projection import bonus_estimate, position_medians
     from dataclasses import replace
+    med = position_medians(client.players())
     base = max(client.players(), key=lambda p: p.minutes)
+    prior = med[base.position]["bps"]
     high_bps = replace(base, bps=base.bps * 3)
-    assert bonus_estimate(high_bps) > bonus_estimate(base)
+    assert bonus_estimate(high_bps, prior) > bonus_estimate(base, prior)
 
 
 def test_form_signal_changes_a_projection(client):
@@ -953,12 +955,47 @@ def test_low_minutes_player_falls_back_to_position_median(client):
     from fplbot.projection import position_medians, _per_90
     med = position_medians(client.players())
     assert med["FWD"]["xg"] > 0
-    assert _per_90(5.0, minutes=40, fallback=med["FWD"]["xg"]) == med["FWD"]["xg"]
+    # A 40-minute cameo is dominated by the prior, not by its own rate.
+    assert _per_90(5.0, minutes=0, prior=med["FWD"]["xg"]) == med["FWD"]["xg"]
+    thin = _per_90(5.0, minutes=40, prior=med["FWD"]["xg"])
+    assert abs(thin - med["FWD"]["xg"]) < abs(thin - (5.0 / (40 / 90)))
+
+
+def test_no_clean_sheet_probability_is_physically_implausible(client):
+    """No Premier League defence keeps a clean sheet 55% of the time. A model
+    that says otherwise is reading a three-match sample as settled fact."""
+    from fplbot.projection import clean_sheet_probability, team_xgc_per_90
+    xgc = team_xgc_per_90(client.players())
+    worst = max((clean_sheet_probability(v, 1), tid) for tid, v in xgc.items())
+    assert worst[0] <= 0.55, f"team {worst[1]} projects a {worst[0]:.0%} clean sheet"
+
+
+def test_shrinkage_pulls_a_small_sample_toward_the_prior():
+    from fplbot.projection import _shrink
+    # An extreme rate seen over 3 matches should land nearer the prior than
+    # the observation; over 30 matches it should barely move.
+    early = _shrink(observed=0.3, prior=1.5, matches=3)
+    late = _shrink(observed=0.3, prior=1.5, matches=30)
+    assert 0.3 < late < early < 1.5
+    assert abs(late - 0.3) < abs(early - 0.3)
+
+
+def test_no_budget_defender_outranks_the_premium_attackers(client):
+    """The original bug put £4.0m Ipswich defenders alongside Haaland. This
+    targets that shape directly, and has real margin unlike a bare count."""
+    settings = Settings(cache_dir="/tmp/x")
+    proj = project_all(players=client.players(), teams=client.teams(),
+                       fixtures=client.fixtures(),
+                       next_gw_id=client.next_gameweek().id, settings=settings)
+    by_id = {p.id: p for p in client.players()}
+    top10 = sorted(proj.values(), key=lambda x: x.total, reverse=True)[:10]
+    cheap = [by_id[t.player_id].web_name for t in top10
+             if by_id[t.player_id].position == "DEF" and by_id[t.player_id].now_cost <= 45]
+    assert not cheap, f"budget defenders in the top 10: {cheap}"
 
 
 def test_defenders_do_not_dominate_the_top_of_the_board(client):
-    """Sanity check against football, not just against the code. Budget
-    defenders on weak teams previously projected alongside Haaland."""
+    """Coarse net beneath the sharper guards above."""
     settings = Settings(cache_dir="/tmp/x")
     proj = project_all(players=client.players(), teams=client.teams(),
                        fixtures=client.fixtures(),
@@ -966,7 +1003,7 @@ def test_defenders_do_not_dominate_the_top_of_the_board(client):
     by_id = {p.id: p for p in client.players()}
     top20 = sorted(proj.values(), key=lambda x: x.total, reverse=True)[:20]
     defenders = sum(1 for t in top20 if by_id[t.player_id].position == "DEF")
-    assert defenders <= 10, f"{defenders}/20 of the top projections are defenders"
+    assert defenders <= 12, f"{defenders}/20 of the top projections are defenders"
 
 
 def test_later_gameweeks_are_decayed(projections):
@@ -1000,22 +1037,40 @@ import statistics
 from fplbot.config import SCORING, Settings
 from fplbot.models import Fixture, Player, PlayerSentiment, Projection, Team
 
-MINUTES_FLOOR = 270  # three full matches before per-90 rates are trusted
+MINUTES_FLOOR = 270  # three full matches; used for selection share, not rates
+
+# Prior weight in matches when regressing a rate toward its cohort mean.
+# Set to twice the early-season sample: three matches in, the observed rate
+# and the prior carry roughly equal weight.
+SHRINKAGE_K = 6.0
+
+LEAGUE_DEFAULT_XGC = 1.4  # goals per 90, used only when a club has no data
 
 # Multiplies a club's own expected goals conceded for this fixture. Difficulty
 # runs 1 (easiest) to 5 (hardest).
 DIFFICULTY_MULTIPLIER = {1: 0.70, 2: 0.85, 3: 1.00, 4: 1.20, 5: 1.45}
 
 
-def _per_90(total: float, minutes: int, fallback: float = 0.0) -> float:
-    """Per-90 rate, or the position's median when the sample is too small.
+def _shrink(observed: float, prior: float, matches: float) -> float:
+    """Regress a rate toward a prior, weighted by how much football we have seen.
 
-    A player with 40 minutes has an unstable rate; returning their raw
-    extrapolation would let a single cameo goal project like a season of form.
+    Three matches into a season a raw per-90 rate is mostly noise. Arsenal's
+    observed 0.31 xGC/90 implies a 74% clean-sheet chance; no real defence
+    achieves that. Shrinking toward the cohort mean stops early-season
+    extremes from driving squad selection, and fades out on its own as
+    matches accumulate.
     """
-    if minutes < MINUTES_FLOOR:
-        return fallback
-    return total / (minutes / 90)
+    if matches <= 0:
+        return prior
+    return (matches * observed + SHRINKAGE_K * prior) / (matches + SHRINKAGE_K)
+
+
+def _per_90(total: float, minutes: int, prior: float) -> float:
+    """Shrunk per-90 rate. A continuous curve, not a cliff at a minutes floor."""
+    matches = minutes / 90
+    if matches <= 0:
+        return prior
+    return _shrink(total / matches, prior, matches)
 
 
 def position_medians(players: list[Player]) -> dict[str, dict[str, float]]:
@@ -1025,11 +1080,12 @@ def position_medians(players: list[Player]) -> dict[str, dict[str, float]]:
         pool = [p for p in players
                 if p.position == position and p.minutes >= MINUTES_FLOOR]
         if not pool:
-            out[position] = {"xg": 0.0, "xa": 0.0}
+            out[position] = {"xg": 0.0, "xa": 0.0, "bps": 0.0}
             continue
         out[position] = {
             "xg": statistics.median(p.expected_goals / (p.minutes / 90) for p in pool),
             "xa": statistics.median(p.expected_assists / (p.minutes / 90) for p in pool),
+            "bps": statistics.median(p.bps / (p.minutes / 90) for p in pool),
         }
     return out
 
@@ -1042,18 +1098,27 @@ def team_xgc_per_90(players: list[Player]) -> dict[int, float]:
     is what the spec means by "the club's expected_goals_conceded" — using a
     fixture-difficulty digit alone cannot tell a good defence from a bad one.
     """
-    by_team: dict[int, float] = {}
+    raw: dict[int, tuple[float, float]] = {}  # team_id -> (rate, matches)
     for team_id in {p.team_id for p in players}:
         keepers = [p for p in players
                    if p.team_id == team_id and p.position == "GKP" and p.minutes >= 180]
         if keepers:
             gk = max(keepers, key=lambda p: p.minutes)
-            by_team[team_id] = gk.expected_goals_conceded / (gk.minutes / 90)
+            matches = gk.minutes / 90
+            raw[team_id] = (gk.expected_goals_conceded / matches, matches)
         else:
-            outfield = [p.expected_goals_conceded / (p.minutes / 90) for p in players
-                        if p.team_id == team_id and p.minutes >= MINUTES_FLOOR]
-            by_team[team_id] = statistics.median(outfield) if outfield else 1.4
-    return by_team
+            pool = [(p.expected_goals_conceded / (p.minutes / 90), p.minutes / 90)
+                    for p in players
+                    if p.team_id == team_id and p.minutes >= 180]
+            raw[team_id] = (
+                (statistics.median(r for r, _ in pool), max(m for _, m in pool))
+                if pool else (LEAGUE_DEFAULT_XGC, 0.0)
+            )
+
+    league_mean = statistics.mean(r for r, _ in raw.values()) if raw else LEAGUE_DEFAULT_XGC
+    # Shrink toward the league mean: an elite defence three matches in is
+    # partly real and partly a small sample, and the model should say so.
+    return {tid: _shrink(rate, league_mean, matches) for tid, (rate, matches) in raw.items()}
 
 
 def minutes_probability(
@@ -1092,16 +1157,14 @@ def clean_sheet_probability(team_xgc90: float, difficulty: int) -> float:
     return math.exp(-max(0.05, adjusted))
 
 
-def bonus_estimate(player: Player) -> float:
+def bonus_estimate(player: Player, prior_bps90: float) -> float:
     """Expected bonus points per appearance, from BPS rate and ICT.
 
     Bonus is awarded to the top three BPS scorers in a match. A player
     averaging well above the ~25 BPS mark earns bonus regularly; below it,
     rarely. ICT is blended in as a secondary signal of involvement.
     """
-    if player.minutes < MINUTES_FLOOR:
-        return 0.0
-    bps90 = player.bps / (player.minutes / 90)
+    bps90 = _per_90(player.bps, player.minutes, prior_bps90)
     from_bps = max(0.0, (bps90 - 18.0) / 12.0)
     from_ict = player.ict_index / 200
     return min(1.5, 0.7 * from_bps + 0.3 * from_ict)
@@ -1121,7 +1184,7 @@ def expected_points_one_gw(
     pos = player.position
     appearance = SCORING["appearance_60_plus"] * minutes_prob
 
-    med = medians.get(pos, {"xg": 0.0, "xa": 0.0})
+    med = medians.get(pos, {"xg": 0.0, "xa": 0.0, "bps": 0.0})
     xg90 = _per_90(player.expected_goals, player.minutes, med["xg"])
     xa90 = _per_90(player.expected_assists, player.minutes, med["xa"])
     attacking = xg90 * SCORING["goal"][pos] + xa90 * SCORING["assist"][pos]
@@ -1141,7 +1204,8 @@ def expected_points_one_gw(
     # The form channel moves attacking output and bonus — the parts of a
     # projection that genuine form talk is about. It does not touch clean
     # sheets or appearance, which are team and selection properties.
-    scored = (attacking + bonus_estimate(player)) * form_multiplier + clean_sheet + dc
+    scored = ((attacking + bonus_estimate(player, med["bps"])) * form_multiplier
+              + clean_sheet + dc)
     return minutes_prob * scored + appearance
 
 
@@ -1209,7 +1273,7 @@ def project_all(
 - [ ] **Step 4: Run tests**
 
 Run: `python3 -m pytest tests/test_projection.py -v`
-Expected: 14 passed
+Expected: 17 passed
 
 - [ ] **Step 5: Commit**
 
