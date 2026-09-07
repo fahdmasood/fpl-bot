@@ -95,3 +95,34 @@ def test_next_gameweek_returns_last_when_all_deadlines_past(client):
 
     result = _select_next_gameweek(weeks, now)
     assert result.id == 3
+
+
+def test_invalid_payload_raises_even_when_a_stale_cache_exists(client, tmp_path):
+    """A malformed 200 response must surface, not silently serve stale data.
+    Otherwise bad data becomes permanent and invisible."""
+    import pytest
+    from fplbot.fetch import InvalidPayload
+
+    client.bootstrap()  # populate a good cache
+    client._memory.clear()
+
+    class BadPayloadSession:
+        calls = []
+
+        def get(self, url, **kwargs):
+            class R:
+                status_code = 200
+
+                @staticmethod
+                def json():
+                    return {"detail": "Not found."}
+
+                @staticmethod
+                def raise_for_status():
+                    return None
+
+            return R()
+
+    client.session = BadPayloadSession()
+    with pytest.raises(InvalidPayload):
+        client.bootstrap()

@@ -19,6 +19,12 @@ BASE = "https://fantasy.premierleague.com/api"
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; fplbot/0.1)"}
 
 
+class InvalidPayload(Exception):
+    """Raised when an API response has an unexpected shape."""
+
+    pass
+
+
 def _dt(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
 
@@ -70,6 +76,13 @@ class FplClient:
         path = self._cache_path(key)
         return time.time() - path.stat().st_mtime if path.exists() else None
 
+    def _write_cache_atomic(self, key: str, payload: dict | list) -> None:
+        """Write payload to cache atomically via temp file + replace."""
+        path = self._cache_path(key)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload))
+        os.replace(tmp, path)
+
     def _get(self, key: str, url: str) -> dict:
         if key in self._memory:
             return self._memory[key]
@@ -78,17 +91,9 @@ class FplClient:
             response = self.session.get(url, headers=HEADERS, timeout=30)
             response.raise_for_status()
             payload = response.json()
-            # Validate before caching to avoid poisoning the cache
-            if not _validate_payload(key, payload):
-                raise ValueError(f"invalid payload for {key}: validation failed")
-            # Atomic write: write to temp file and replace in place
-            path = self._cache_path(key)
-            tmp = path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(payload))
-            os.replace(tmp, path)
         except Exception as exc:
-            # A stale answer beats no answer. If the network is down at the
-            # deadline, an old projection is still actionable.
+            # Network/transport failure only. A stale answer beats no answer. If the
+            # network is down at the deadline, an old projection is still actionable.
             path = self._cache_path(key)
             if not path.exists():
                 raise
@@ -99,6 +104,12 @@ class FplClient:
             except Exception as cache_exc:
                 # If the cached file is unreadable, raise the original exception
                 raise exc from cache_exc
+        else:
+            # Validation failures must propagate. Serving a stale cache to paper
+            # over a malformed payload is how bad data becomes permanent.
+            if not _validate_payload(key, payload):
+                raise InvalidPayload(f"{key} returned an unexpected shape")
+            self._write_cache_atomic(key, payload)
 
         self._memory[key] = payload
         return payload
