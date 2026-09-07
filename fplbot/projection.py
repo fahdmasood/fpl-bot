@@ -53,6 +53,9 @@ def _per_90(total: float, minutes: int, prior: float) -> float:
     return _shrink(total / matches, prior, matches)
 
 
+EMPTY_MEDIANS = {"xg": 0.0, "xa": 0.0, "bps": 0.0, "dc": 0.0, "saves": 0.0}
+
+
 def position_medians(players: list[Player]) -> dict[str, dict[str, float]]:
     """Median per-90 rates by position, for the low-minutes fallback."""
     out: dict[str, dict[str, float]] = {}
@@ -60,13 +63,14 @@ def position_medians(players: list[Player]) -> dict[str, dict[str, float]]:
         pool = [p for p in players
                 if p.position == position and p.minutes >= MEDIAN_POOL_MINUTES]
         if not pool:
-            out[position] = {"xg": 0.0, "xa": 0.0, "bps": 0.0, "dc": 0.0}
+            out[position] = EMPTY_MEDIANS
             continue
         out[position] = {
             "xg": statistics.median(p.expected_goals / (p.minutes / 90) for p in pool),
             "xa": statistics.median(p.expected_assists / (p.minutes / 90) for p in pool),
             "bps": statistics.median(p.bps / (p.minutes / 90) for p in pool),
             "dc": statistics.median(p.defensive_contribution_per_90 for p in pool),
+            "saves": statistics.median(p.saves / (p.minutes / 90) for p in pool),
         }
     return out
 
@@ -198,7 +202,7 @@ def expected_points_one_gw(
     pos = player.position
     appearance = SCORING["appearance_60_plus"] * minutes_prob
 
-    med = medians.get(pos, {"xg": 0.0, "xa": 0.0, "bps": 0.0, "dc": 0.0})
+    med = medians.get(pos, EMPTY_MEDIANS)
     xg90 = _per_90(player.expected_goals, player.minutes, med["xg"])
     xa90 = _per_90(player.expected_assists, player.minutes, med["xa"])
     attacking = xg90 * SCORING["goal"][pos] + xa90 * SCORING["assist"][pos]
@@ -209,6 +213,23 @@ def expected_points_one_gw(
     clean_sheet = (
         clean_sheet_probability(team_xgc90, difficulty) * cs_points if cs_points else 0.0
     )
+
+    # Goals conceded cost a goalkeeper or defender a point per two conceded,
+    # so the expected charge is expected goals conceded over that divisor.
+    # Without it the model took a bad defence's upside, the defensive
+    # contribution points a besieged back line piles up, and none of its
+    # downside: the three highest contribution rates in live data all belong
+    # to newly promoted clubs.
+    conceded = 0.0
+    saves = 0.0
+    if pos in ("GKP", "DEF"):
+        expected_conceded = team_xgc90 * DIFFICULTY_MULTIPLIER.get(difficulty, 1.0)
+        conceded = -(expected_conceded / SCORING["goals_conceded_per_penalty"])
+    if pos == "GKP":
+        # A shot stopper behind a busy defence earns real points back.
+        # Shrunk toward the goalkeeper median like every other rate.
+        saves90 = _per_90(player.saves, player.minutes, med["saves"])
+        saves = saves90 / SCORING["saves_per_point"]
 
     threshold = SCORING["defensive_threshold"][pos]
     if threshold < 99:
@@ -224,7 +245,7 @@ def expected_points_one_gw(
     # projection that genuine form talk is about. It does not touch clean
     # sheets or appearance, which are team and selection properties.
     scored = ((attacking + bonus_estimate(player, med["bps"])) * form_multiplier
-              + clean_sheet + dc)
+              + clean_sheet + dc + conceded + saves)
     return minutes_prob * scored + appearance
 
 

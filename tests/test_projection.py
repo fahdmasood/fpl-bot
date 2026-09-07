@@ -253,3 +253,68 @@ def test_later_gameweeks_are_decayed(projections):
     assert both, "no player projects points in both of the first two gameweeks"
     p = max(both, key=lambda x: x.total)
     assert p.per_gameweek[1] < p.per_gameweek[0]
+
+
+GK_RAW = {
+    "id": 90, "web_name": "Keeper", "element_type": 1, "team": 1,
+    "now_cost": 50, "status": "a", "chance_of_playing_next_round": None,
+    "minutes": 900, "form": "4.0", "selected_by_percent": "5",
+    "expected_goals": "0.0", "expected_assists": "0.0",
+    "expected_goals_conceded": "12.0", "defensive_contribution_per_90": "0.0",
+    "ict_index": "30", "bps": 250, "starts": 10, "saves": 20,
+}
+
+DEF_RAW = {**GK_RAW, "id": 91, "web_name": "Back", "element_type": 2,
+           "defensive_contribution_per_90": "8.0", "saves": 0}
+
+
+def _fixture_for(team_id=1, difficulty=3):
+    from fplbot.models import Fixture
+    return Fixture(id=1, event=5, team_h=team_id, team_a=99,
+                   team_h_difficulty=difficulty, team_a_difficulty=difficulty,
+                   kickoff_time=None)
+
+
+def test_a_besieged_defence_is_penalised_beyond_the_lost_clean_sheet(client):
+    """Defensive contribution points accrue to defenders at bad clubs, which
+    is right, but the offsetting goals conceded penalty was missing entirely,
+    so the model took a bad defence's upside and none of its downside."""
+    from fplbot.models import Player
+    from fplbot.config import SCORING
+    from fplbot.projection import (clean_sheet_probability,
+                                   expected_points_one_gw, position_medians)
+
+    med = position_medians(client.players())
+    player = Player.from_api(DEF_RAW)
+    fixture = _fixture_for()
+    mp = 0.9
+    tight, leaky = 0.8, 2.2
+
+    common = dict(player=player, fixture=fixture, minutes_prob=mp, medians=med)
+    gap = (expected_points_one_gw(team_xgc90=tight, **common)
+           - expected_points_one_gw(team_xgc90=leaky, **common))
+
+    clean_sheet_only = mp * SCORING["clean_sheet"]["DEF"] * (
+        clean_sheet_probability(tight, 3) - clean_sheet_probability(leaky, 3))
+
+    assert gap > clean_sheet_only + 0.2, (
+        "the whole advantage of a good defence is the clean sheet, so goals "
+        f"conceded are not being charged: {gap:.3f} vs {clean_sheet_only:.3f}"
+    )
+
+
+def test_a_goalkeeper_facing_shots_gains_from_saves(client):
+    """SCORING carries saves_per_point and the model never read it, so a
+    shot-stopper behind a busy defence scored the same as one who never
+    touched the ball."""
+    from fplbot.models import Player
+    from fplbot.projection import expected_points_one_gw, position_medians
+
+    med = position_medians(client.players())
+    quiet = Player.from_api({**GK_RAW, "saves": 10})
+    busy = Player.from_api({**GK_RAW, "saves": 60})
+    common = dict(team_xgc90=1.4, fixture=_fixture_for(), minutes_prob=0.9,
+                  medians=med)
+
+    assert (expected_points_one_gw(player=busy, **common)
+            > expected_points_one_gw(player=quiet, **common) + 0.5)

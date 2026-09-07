@@ -40,6 +40,7 @@ class Player:
     defensive_contribution_per_90: float
     ict_index: float
     bps: int
+    saves: int
 
     @property
     def price_m(self) -> float:
@@ -76,6 +77,7 @@ class Player:
             defensive_contribution_per_90=_f(raw.get("defensive_contribution_per_90")),
             ict_index=_f(raw.get("ict_index")),
             bps=raw.get("bps", 0),
+            saves=raw.get("saves", 0),
         )
 
 
