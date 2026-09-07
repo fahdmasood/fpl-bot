@@ -1,0 +1,308 @@
+{
+  "generated_at": "2026-09-07T11:44:03.178941+00:00",
+  "gameweek": {
+    "id": 4,
+    "name": "Gameweek 4",
+    "deadline": "2026-09-12T12:30:00+00:00"
+  },
+  "degraded": true,
+  "degraded_reason": "No sentiment scorer is configured, so no news was collected and the squad was built from statistics alone.",
+  "stats": {
+    "items_fetched": 0,
+    "items_after_filter": 0,
+    "sources_used": [],
+    "sources_absent": [
+      "news-rss",
+      "reddit"
+    ],
+    "reddit_available": false,
+    "reddit_status": "not_configured",
+    "collection_attempted": false,
+    "mentions_resolved": 0,
+    "unique_players_touched": 0,
+    "cache_age_seconds": 0.051903724670410156
+  },
+  "sources_used": [],
+  "sources_absent": [
+    "news-rss",
+    "reddit"
+  ],
+  "total_cost": 998,
+  "optimiser_bank": 2,
+  "projected_total": 122.89,
+  "captain": {
+    "id": 426,
+    "name": "B.Fernandes",
+    "position": "MID",
+    "team_id": 16,
+    "cost": 120,
+    "price_m": 12.0,
+    "projected_points": 13.79,
+    "per_gameweek": [
+      5.38,
+      4.57,
+      3.84
+    ],
+    "explanation": "B.Fernandes (MID, \u00a312.0m): 13.79 pts over 3 GW",
+    "sentiment": null
+  },
+  "squad": [
+    {
+      "id": 1,
+      "name": "Raya",
+      "position": "GKP",
+      "team_id": 1,
+      "cost": 60,
+      "price_m": 6.0,
+      "projected_points": 9.84,
+      "per_gameweek": [
+        3.78,
+        3.17,
+        2.89
+      ],
+      "explanation": "Raya (GKP, \u00a36.0m): 9.84 pts over 3 GW",
+      "sentiment": null
+    },
+    {
+      "id": 4,
+      "name": "Gabriel",
+      "position": "DEF",
+      "team_id": 1,
+      "cost": 80,
+      "price_m": 8.0,
+      "projected_points": 10.38,
+      "per_gameweek": [
+        3.99,
+        3.35,
+        3.04
+      ],
+      "explanation": "Gabriel (DEF, \u00a38.0m): 10.38 pts over 3 GW",
+      "sentiment": null
+    },
+    {
+      "id": 10,
+      "name": "White",
+      "position": "DEF",
+      "team_id": 1,
+      "cost": 55,
+      "price_m": 5.5,
+      "projected_points": 9.63,
+      "per_gameweek": [
+        3.69,
+        3.1,
+        2.83
+      ],
+      "explanation": "White (DEF, \u00a35.5m): 9.63 pts over 3 GW",
+      "sentiment": null
+    },
+    {
+      "id": 68,
+      "name": "Tavernier",
+      "position": "MID",
+      "team_id": 3,
+      "cost": 60,
+      "price_m": 6.0,
+      "projected_points": 11.78,
+      "per_gameweek": [
+        4.66,
+        3.87,
+        3.25
+      ],
+      "explanation": "Tavernier (MID, \u00a36.0m): 11.78 pts over 3 GW",
+      "sentiment": null
+    },
+    {
+      "id": 106,
+      "name": "Thiago",
+      "position": "FWD",
+      "team_id": 4,
+      "cost": 79,
+      "price_m": 7.9,
+      "projected_points": 11.27,
+      "per_gameweek": [
+        4.43,
+        3.72,
+        3.12
+      ],
+      "explanation": "Thiago (FWD, \u00a37.9m): 11.27 pts over 3 GW",
+      "sentiment": null
+    },
+    {
+      "id": 40,
+      "name": "Rogers",
+      "position": "MID",
+      "team_id": 6,
+      "cost": 76,
+      "price_m": 7.6,
+      "projected_points": 11.26,
+      "per_gameweek": [
+        4.45,
+        3.7,
+        3.11
+      ],
+      "explanation": "Rogers (MID, \u00a37.6m): 11.26 pts over 3 GW",
+      "sentiment": null
+    },
+    {
+      "id": 165,
+      "name": "Jo\u00e3o Pedro",
+      "position": "FWD",
+      "team_id": 6,
+      "cost": 77,
+      "price_m": 7.7,
+      "projected_points": 11.4,
+      "per_gameweek": [
+        4.48,
+        3.76,
+        3.16
+      ],
+      "explanation": "Jo\u00e3o Pedro (FWD, \u00a37.7m): 11.40 pts over 3 GW",
+      "sentiment": null
+    },
+    {
+      "id": 110,
+      "name": "Rushworth",
+      "position": "GKP",
+      "team_id": 7,
+      "cost": 45,
+      "price_m": 4.5,
+      "projected_points": 7.92,
+      "per_gameweek": [
+        3.22,
+        2.42,
+        2.27
+      ],
+      "explanation": "Rushworth (GKP, \u00a34.5m): 7.92 pts over 3 GW",
+      "sentiment": null
+    },
+    {
+      "id": 173,
+      "name": "Thomas",
+      "position": "DEF",
+      "team_id": 7,
+      "cost": 40,
+      "price_m": 4.0,
+      "projected_points": 8.64,
+      "per_gameweek": [
+        3.5,
+        2.67,
+        2.47
+      ],
+      "explanation": "Thomas (DEF, \u00a34.0m): 8.64 pts over 3 GW",
+      "sentiment": null
+    },
+    {
+      "id": 249,
+      "name": "Barry",
+      "position": "FWD",
+      "team_id": 9,
+      "cost": 56,
+      "price_m": 5.6,
+      "projected_points": 10.47,
+      "per_gameweek": [
+        4.11,
+        3.46,
+        2.9
+      ],
+      "explanation": "Barry (FWD, \u00a35.6m): 10.47 pts over 3 GW",
+      "sentiment": null
+    },
+    {
+      "id": 277,
+      "name": "Egan",
+      "position": "DEF",
+      "team_id": 11,
+      "cost": 41,
+      "price_m": 4.1,
+      "projected_points": 8.02,
+      "per_gameweek": [
+        2.92,
+        2.77,
+        2.33
+      ],
+      "explanation": "Egan (DEF, \u00a34.1m): 8.02 pts over 3 GW",
+      "sentiment": null
+    },
+    {
+      "id": 368,
+      "name": "Szoboszlai",
+      "position": "MID",
+      "team_id": 14,
+      "cost": 70,
+      "price_m": 7.0,
+      "projected_points": 11.13,
+      "per_gameweek": [
+        4.42,
+        3.67,
+        3.04
+      ],
+      "explanation": "Szoboszlai (MID, \u00a37.0m): 11.13 pts over 3 GW",
+      "sentiment": null
+    },
+    {
+      "id": 388,
+      "name": "Gu\u00e9hi",
+      "position": "DEF",
+      "team_id": 15,
+      "cost": 60,
+      "price_m": 6.0,
+      "projected_points": 9.72,
+      "per_gameweek": [
+        3.59,
+        3.61,
+        2.53
+      ],
+      "explanation": "Gu\u00e9hi (DEF, \u00a36.0m): 9.72 pts over 3 GW",
+      "sentiment": null
+    },
+    {
+      "id": 426,
+      "name": "B.Fernandes",
+      "position": "MID",
+      "team_id": 16,
+      "cost": 120,
+      "price_m": 12.0,
+      "projected_points": 13.79,
+      "per_gameweek": [
+        5.38,
+        4.57,
+        3.84
+      ],
+      "explanation": "B.Fernandes (MID, \u00a312.0m): 13.79 pts over 3 GW",
+      "sentiment": null
+    },
+    {
+      "id": 427,
+      "name": "Mbeumo",
+      "position": "MID",
+      "team_id": 16,
+      "cost": 79,
+      "price_m": 7.9,
+      "projected_points": 12.72,
+      "per_gameweek": [
+        4.96,
+        4.22,
+        3.54
+      ],
+      "explanation": "Mbeumo (MID, \u00a37.9m): 12.72 pts over 3 GW",
+      "sentiment": null
+    }
+  ],
+  "starting_xi": [
+    1,
+    4,
+    10,
+    68,
+    106,
+    40,
+    165,
+    368,
+    388,
+    426,
+    427
+  ],
+  "transfers": [],
+  "transfers_recommended": [],
+  "free_transfers": 1,
+  "transfers_note": ""
+}
