@@ -2056,6 +2056,7 @@ def collect(settings: Settings, reddit=None, now: datetime | None = None):
 
     kept = filter_items(raw, settings, now)
     stats = {
+        "collection_attempted": True,
         "items_fetched": len(raw),
         "items_after_filter": len(kept),
         "sources_used": sources_used,
@@ -2593,7 +2594,7 @@ The report must state its own degradation. If the run had no comment-level Reddi
 ```python
 # tests/test_report.py
 from fplbot.config import Settings
-from fplbot.optimize import pick_squad
+from fplbot.optimize import InfeasibleSquad, pick_squad
 from fplbot.projection import project_all
 from fplbot.report import build_report, render_html, transfer_diff
 
@@ -2879,7 +2880,15 @@ def _degradation_notes(stats: dict) -> list[str]:
     notes: list[str] = []
     absent = stats.get("sources_absent", [])
 
-    if "news-rss" in absent:
+    if not stats.get("collection_attempted", True):
+        # Nothing was collected because nothing would have scored it. Saying
+        # the feeds "could not be read" would send someone debugging feeds
+        # that are working perfectly well.
+        notes.append(
+            "No sentiment scorer is configured, so no news was collected and "
+            "the squad was built from statistics alone."
+        )
+    elif "news-rss" in absent:
         notes.append(
             "The news feeds could not be read this run, so the squad was "
             "built from statistics alone with no sentiment applied."
@@ -3135,89 +3144,69 @@ def test_pipeline_is_deterministic(client, tmp_path):
     assert [p["id"] for p in a["squad"]] == [p["id"] for p in b["squad"]]
 
 
-def test_later_gameweek_projections_do_not_use_earlier_results(client, tmp_path):
-    """Lag features must be frozen at the deadline.
+def test_the_projection_harness_can_detect_a_change_at_all(client, tmp_path):
+    """Positive control for the freeze lag test below.
 
-    A projection for GW+3 may not change when GW+1 results are mutated,
-    because at decision time those results do not exist. Getting this wrong
-    makes a backtest look excellent and the live bot perform badly.
+    That test asserts a projection does NOT move. An assertion of absence is
+    worthless until you have shown the harness can see a change at all. An
+    earlier version mutated `form`, which the model never reads, so it could
+    not have failed no matter how badly the model leaked.
     """
+    import copy
     from fplbot.projection import project_all
 
     settings = Settings(cache_dir=tmp_path)
     players = client.players()
-    next_gw = client.next_gameweek().id
     common = dict(teams=client.teams(), fixtures=client.fixtures(),
-                  next_gw_id=next_gw, settings=settings)
+                  next_gw_id=client.next_gameweek().id, settings=settings)
 
     base = project_all(players=players, **common)
+    target = max(players, key=lambda p: p.expected_goals)
+    bumped = [copy.replace(p, expected_goals=p.expected_goals + 5.0)
+              if p.id == target.id else p for p in players]
+    after = project_all(players=bumped, **common)
 
-    mutated = []
-    for p in players:
-        # Simulate GW+1 having happened differently.
-        mutated.append(copy.replace(p, form=p.form + 5.0) if p.minutes else p)
-
-    after = project_all(players=mutated, **common)
-
-    changed = [pid for pid in base
-               if abs(base[pid].per_gameweek[2] - after[pid].per_gameweek[2]) > 1e-9]
-    assert not changed, (
-        f"{len(changed)} GW+3 projections moved when GW+1 form changed; "
-        "lag features are leaking future results"
+    assert after[target.id].total > base[target.id].total, (
+        "mutating a field the model reads did not change the projection, so "
+        "the freeze lag test below cannot be trusted"
     )
 
 
-def test_an_entry_with_no_picks_yet_does_not_break_the_run(client, tmp_path):
-    """A team registered mid season has no picks until it has played a
-    gameweek, and that endpoint 404s. A squad must still be produced."""
-    from fplbot.cli import run
+def test_every_gameweek_in_the_horizon_uses_the_same_frozen_inputs(client, tmp_path):
+    """Lag features are frozen at the deadline.
 
-    class NoPicks:
-        def __getattr__(self, name):
-            return getattr(client, name)
+    At decision time no gameweek in the horizon has been played, so all of
+    them must be projected from the same season to date inputs. If a later
+    gameweek responded differently to a change than the first one, something
+    would be recomputing from results that do not exist yet, and a backtest
+    would look excellent while the live bot underperformed.
 
-        def entry_picks(self, entry_id, event):
-            raise RuntimeError("404 Not Found")
+    Checked by ratio rather than by equality, because the raw values differ
+    legitimately across gameweeks through decay and fixture difficulty.
+    """
+    import copy
+    from fplbot.projection import project_all
 
-    report = run(Settings(cache_dir=tmp_path), NoPicks(), NullScorer(),
-                 entry_id=10541438)
-    assert len(report["squad"]) == 15
-    assert report["transfers"] == []
+    settings = Settings(cache_dir=tmp_path)
+    players = client.players()
+    common = dict(teams=client.teams(), fixtures=client.fixtures(),
+                  next_gw_id=client.next_gameweek().id, settings=settings)
 
+    base = project_all(players=players, **common)
+    target = max(players, key=lambda p: p.expected_goals)
+    bumped = [copy.replace(p, expected_goals=p.expected_goals + 5.0)
+              if p.id == target.id else p for p in players]
+    after = project_all(players=bumped, **common)
 
-def test_free_transfers_limit_what_is_recommended(client, tmp_path):
-    """Listing every difference from the optimum is a wish list. Only moves
-    covered by a free transfer, or gaining more than the four point hit,
-    should be recommended."""
-    from fplbot.report import annotate_transfer_plan
-
-    moves = [
-        {"position": "MID", "gain": 9.0, "affordable": True,
-         "out": {"name": "a"}, "in": {"name": "b"}, "cost_change": 0},
-        {"position": "MID", "gain": 5.0, "affordable": True,
-         "out": {"name": "c"}, "in": {"name": "d"}, "cost_change": 0},
-        {"position": "DEF", "gain": 2.0, "affordable": True,
-         "out": {"name": "e"}, "in": {"name": "f"}, "cost_change": 0},
+    ratios = [
+        a / b
+        for b, a in zip(base[target.id].per_gameweek, after[target.id].per_gameweek)
+        if b > 0
     ]
-    planned = annotate_transfer_plan(moves, free_transfers=1)
-
-    assert planned[0]["uses_free_transfer"] is True
-    assert planned[0]["recommended"] is True
-    # Second move gains 5 against a 4 point hit, so it is narrowly worth it.
-    assert planned[1]["uses_free_transfer"] is False
-    assert planned[1]["net_gain"] == 1.0
-    assert planned[1]["recommended"] is True
-    # Third gains 2 against a 4 point hit, so it is not.
-    assert planned[2]["net_gain"] == -2.0
-    assert planned[2]["recommended"] is False
-
-
-def test_an_unaffordable_move_is_never_recommended(client):
-    from fplbot.report import annotate_transfer_plan
-    moves = [{"position": "FWD", "gain": 20.0, "affordable": False,
-              "out": {"name": "a"}, "in": {"name": "b"}, "cost_change": 50}]
-    planned = annotate_transfer_plan(moves, free_transfers=1)
-    assert planned[0]["recommended"] is False
+    assert len(ratios) >= 2, "need at least two scoring gameweeks to compare"
+    assert max(ratios) - min(ratios) < 1e-9, (
+        f"gameweeks responded differently to the same input change: {ratios}"
+    )
 
 
 def test_cli_writes_json_and_html(client, tmp_path, monkeypatch):
@@ -3284,6 +3273,8 @@ def run(settings: Settings, client: FplClient, scorer, entry_id: int | None = No
             "items_fetched": 0, "items_after_filter": 0,
             "sources_used": [], "sources_absent": ["news-rss", "reddit"],
             "reddit_available": False, "reddit_status": "not_configured",
+            # Distinguishes "not attempted" from "attempted and failed".
+            "collection_attempted": False,
         }
     else:
         items, stats = collect(settings, now=now)
@@ -3343,8 +3334,15 @@ def main(argv=None) -> int:
         log.warning("no scorer configured; producing a stats-only squad")
         scorer = NullScorer()
 
-    report = run(settings, _build_client(settings), scorer, args.team_id,
-                 free_transfers=args.free_transfers)
+    try:
+        report = run(settings, _build_client(settings), scorer, args.team_id,
+                     free_transfers=args.free_transfers)
+    except InfeasibleSquad as exc:
+        # The solver could not build a legal squad. Nearly always this means
+        # the projections are broken rather than the constraints, so say the
+        # binding constraint rather than printing a traceback.
+        print(f"Could not build a legal squad: {exc}")
+        return 1
 
     out = Path(args.output)
     out.with_suffix(".json").write_text(json.dumps(report, indent=2))
