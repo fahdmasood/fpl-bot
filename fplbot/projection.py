@@ -14,9 +14,11 @@ from fplbot.models import Fixture, Player, PlayerSentiment, Projection, Team
 MINUTES_FLOOR = 270  # three full matches; used for selection share, not rates
 
 # Prior weight in matches when regressing a rate toward its cohort mean.
-# Set to twice the early-season sample: three matches in, the observed rate
-# and the prior carry roughly equal weight.
-SHRINKAGE_K = 6.0
+# Chosen by measurement, not feel: K=2 lets a clean-sheet probability breach
+# the 55% plausibility ceiling; K=6 leaves ~9 points of unused headroom under
+# it while halving the league's defensive spread. K=4 keeps a 5-point margin
+# and preserves noticeably more of the real signal.
+SHRINKAGE_K = 4.0
 
 LEAGUE_DEFAULT_XGC = 1.4  # goals per 90, used only when a club has no data
 
@@ -54,12 +56,13 @@ def position_medians(players: list[Player]) -> dict[str, dict[str, float]]:
         pool = [p for p in players
                 if p.position == position and p.minutes >= MINUTES_FLOOR]
         if not pool:
-            out[position] = {"xg": 0.0, "xa": 0.0, "bps": 0.0}
+            out[position] = {"xg": 0.0, "xa": 0.0, "bps": 0.0, "dc": 0.0}
             continue
         out[position] = {
             "xg": statistics.median(p.expected_goals / (p.minutes / 90) for p in pool),
             "xa": statistics.median(p.expected_assists / (p.minutes / 90) for p in pool),
             "bps": statistics.median(p.bps / (p.minutes / 90) for p in pool),
+            "dc": statistics.median(p.defensive_contribution_per_90 for p in pool),
         }
     return out
 
@@ -131,6 +134,25 @@ def clean_sheet_probability(team_xgc90: float, difficulty: int) -> float:
     return math.exp(-max(0.05, adjusted))
 
 
+def poisson_at_least(threshold: int, mean: float) -> float:
+    """P(X >= threshold) for X ~ Poisson(mean).
+
+    Defensive contributions are counts, and the 2 points are awarded per match
+    for clearing a threshold — so what matters is the PROBABILITY of clearing
+    it, not the ratio of the average to it. A player averaging 11.67 actions
+    against a threshold of 12 clears it roughly half the time; treating
+    11.67/12 as a 97% share credits him nearly full points every match.
+    """
+    if mean <= 0:
+        return 0.0
+    term = math.exp(-mean)
+    cumulative = term
+    for k in range(1, threshold):
+        term *= mean / k
+        cumulative += term
+    return max(0.0, min(1.0, 1.0 - cumulative))
+
+
 def bonus_estimate(player: Player, prior_bps90: float) -> float:
     """Expected bonus points per appearance, from BPS rate and ICT.
 
@@ -158,7 +180,7 @@ def expected_points_one_gw(
     pos = player.position
     appearance = SCORING["appearance_60_plus"] * minutes_prob
 
-    med = medians.get(pos, {"xg": 0.0, "xa": 0.0, "bps": 0.0})
+    med = medians.get(pos, {"xg": 0.0, "xa": 0.0, "bps": 0.0, "dc": 0.0})
     xg90 = _per_90(player.expected_goals, player.minutes, med["xg"])
     xa90 = _per_90(player.expected_assists, player.minutes, med["xa"])
     attacking = xg90 * SCORING["goal"][pos] + xa90 * SCORING["assist"][pos]
@@ -170,10 +192,15 @@ def expected_points_one_gw(
         clean_sheet_probability(team_xgc90, difficulty) * cs_points if cs_points else 0.0
     )
 
-    dc90 = player.defensive_contribution_per_90
     threshold = SCORING["defensive_threshold"][pos]
-    dc = (SCORING["defensive_contribution"][pos] * min(1.0, dc90 / threshold)
-          if threshold < 99 else 0.0)
+    if threshold < 99:
+        # Shrunk like every other rate, then converted to a probability of
+        # clearing the threshold rather than a ratio against it.
+        dc90 = _shrink(player.defensive_contribution_per_90, med["dc"],
+                       player.minutes / 90)
+        dc = SCORING["defensive_contribution"][pos] * poisson_at_least(threshold, dc90)
+    else:
+        dc = 0.0
 
     # The form channel moves attacking output and bonus — the parts of a
     # projection that genuine form talk is about. It does not touch clean

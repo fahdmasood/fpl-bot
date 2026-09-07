@@ -149,6 +149,37 @@ def test_no_clean_sheet_probability_is_physically_implausible(client):
     assert worst[0] <= 0.55, f"team {worst[1]} projects a {worst[0]:.0%} clean sheet"
 
 
+def test_defensive_contribution_is_a_probability_not_a_ratio():
+    """A player averaging exactly the threshold clears it about half the time.
+    The bug this replaced credited him ~100% of the award."""
+    from fplbot.projection import poisson_at_least
+    at_threshold = poisson_at_least(12, 12.0)
+    assert 0.3 < at_threshold < 0.6, at_threshold
+    # And the ratio proxy it replaced would have said 1.0.
+    assert at_threshold < 1.0
+
+
+def test_defensive_contribution_probability_rises_with_the_rate():
+    from fplbot.projection import poisson_at_least
+    probs = [poisson_at_least(12, m) for m in (6.0, 9.0, 12.0, 15.0, 18.0)]
+    assert probs == sorted(probs)
+    assert probs[0] < 0.05 and probs[-1] > 0.9
+
+
+def test_a_player_who_cannot_have_cleared_the_threshold_is_not_credited_as_if_he_did(client):
+    """Janelt: 35 defensive actions across 3 matches, threshold 12. He cannot
+    have cleared it more than twice, so he must not be credited near-fully."""
+    from fplbot.projection import poisson_at_least, position_medians, _shrink
+    med = position_medians(client.players())
+    janelt = [p for p in client.players() if p.web_name == "Janelt"]
+    if not janelt:
+        import pytest
+        pytest.skip("Janelt not in this snapshot")
+    p = janelt[0]
+    dc90 = _shrink(p.defensive_contribution_per_90, med["MID"]["dc"], p.minutes / 90)
+    assert poisson_at_least(12, dc90) < 0.6
+
+
 def test_shrinkage_pulls_a_small_sample_toward_the_prior():
     from fplbot.projection import _shrink
     # An extreme rate seen over 3 matches should land nearer the prior than
