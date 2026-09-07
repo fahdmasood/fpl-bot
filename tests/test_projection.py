@@ -89,6 +89,65 @@ def test_sentiment_cannot_rescue_a_flagged_player():
     assert hyped == 0.0
 
 
+def test_a_strong_defence_beats_a_weak_one_on_clean_sheets():
+    """The bug this replaced ranked Ipswich above Manchester City because it
+    only read the fixture-difficulty digit, never the clubs' actual defences."""
+    from fplbot.projection import clean_sheet_probability
+    strong = clean_sheet_probability(team_xgc90=0.9, difficulty=4)   # elite D, hard game
+    weak = clean_sheet_probability(team_xgc90=2.0, difficulty=3)     # poor D, easier game
+    assert strong > weak
+
+
+def test_clean_sheet_probability_falls_as_difficulty_rises():
+    from fplbot.projection import clean_sheet_probability
+    probs = [clean_sheet_probability(1.2, d) for d in (1, 2, 3, 4, 5)]
+    assert probs == sorted(probs, reverse=True)
+
+
+def test_bonus_uses_bps_not_just_ict(client):
+    """The spec names BPS; an ICT-only bonus term ignores half the signal."""
+    from fplbot.projection import bonus_estimate
+    from dataclasses import replace
+    base = max(client.players(), key=lambda p: p.minutes)
+    high_bps = replace(base, bps=base.bps * 3)
+    assert bonus_estimate(high_bps) > bonus_estimate(base)
+
+
+def test_form_signal_changes_a_projection(client):
+    """form/hype sentiment must actually move something. It previously did not."""
+    settings = Settings(cache_dir="/tmp/x")
+    target = max(client.players(), key=lambda p: p.expected_goals)
+    common = dict(players=client.players(), teams=client.teams(),
+                  fixtures=client.fixtures(), next_gw_id=client.next_gameweek().id,
+                  settings=settings)
+    base = project_all(**common)
+    hyped = project_all(**common, sentiment={
+        target.id: PlayerSentiment(target.id, availability_signal=0.0,
+                                   form_signal=1.0, volume=5)})
+    assert hyped[target.id].total > base[target.id].total
+
+
+def test_low_minutes_player_falls_back_to_position_median(client):
+    """Returning 0.0 for a thin sample silently zeroes every new signing."""
+    from fplbot.projection import position_medians, _per_90
+    med = position_medians(client.players())
+    assert med["FWD"]["xg"] > 0
+    assert _per_90(5.0, minutes=40, fallback=med["FWD"]["xg"]) == med["FWD"]["xg"]
+
+
+def test_defenders_do_not_dominate_the_top_of_the_board(client):
+    """Sanity check against football, not just against the code. Budget
+    defenders on weak teams previously projected alongside Haaland."""
+    settings = Settings(cache_dir="/tmp/x")
+    proj = project_all(players=client.players(), teams=client.teams(),
+                       fixtures=client.fixtures(),
+                       next_gw_id=client.next_gameweek().id, settings=settings)
+    by_id = {p.id: p for p in client.players()}
+    top20 = sorted(proj.values(), key=lambda x: x.total, reverse=True)[:20]
+    defenders = sum(1 for t in top20 if by_id[t.player_id].position == "DEF")
+    assert defenders <= 10, f"{defenders}/20 of the top projections are defenders"
+
+
 def test_later_gameweeks_are_decayed(projections):
     """Pick a player scoring in both weeks; a blank gameweek is a legitimate
     zero and would make a naive comparison flake."""
