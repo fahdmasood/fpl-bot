@@ -50,7 +50,13 @@ def test_ambiguous_surname_resolved_by_club_context():
 
 
 def test_null_scorer_returns_nothing():
-    assert NullScorer().score([1, 2, 3]) == {}
+    """Passed real Mentions, not bare ints: a scorer that never looks at its
+    argument is not evidence that the argument shape is right."""
+    players = [make_player(1, "Saka"), make_player(2, "Odegaard")]
+    mentions = resolve_mentions(
+        [item("Saka has a knock"), item("Odegaard is fit")], players)
+    assert len(mentions) == 2
+    assert NullScorer().score(mentions) == {}
 
 
 def test_scores_are_matched_by_index_not_position():

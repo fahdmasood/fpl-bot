@@ -138,11 +138,17 @@ def test_unaffordable_transfers_are_flagged_not_hidden(client):
                 key=lambda p: p.now_cost)
     current[current.index(target)] = cheap.id
 
+    # The dearest midfielder in the optimal squad against the cheapest one
+    # outside it, so the move cannot cost nothing and the assertion below is
+    # unconditional. Behind an "if" it was free to pass by never running.
+    assert by_id[target].now_cost > cheap.now_cost
+
     moves = transfer_diff(current, squad.players, players, projections, bank=0)
     assert len(moves) == 1
+    assert moves[0]["cost_change"] > 0
     # Buying back a dearer player with nothing in the bank is not affordable.
-    if moves[0]["cost_change"] > 0:
-        assert moves[0]["affordable"] is False
+    assert moves[0]["affordable"] is False
+    assert annotate_transfer_plan(moves, free_transfers=1)[0]["recommended"] is False
 
 
 def test_html_shows_reasoning_and_transfers(client):
@@ -172,10 +178,20 @@ def test_identical_squads_produce_no_transfers(client):
 
 
 def test_html_renders_and_escapes(client):
+    """No field in a real report contains a bracket, so asserting on an
+    untouched report passed just as well with str() in place of esc(). The
+    hostile text has to be injected for the escaping to be under test."""
     report, *_ = _report(client)
+    payload = '<script>alert("xss")</script>'
+    report["squad"][0]["name"] = payload
+    report["squad"][0]["explanation"] = payload
+    report["captain"]["name"] = payload
+
     html = render_html(report)
     assert "<html" in html.lower()
-    assert "<script>" not in html
+    assert "<script>" not in html, "a raw script tag reached the page"
+    assert "&lt;script&gt;" in html, "the payload was dropped, not escaped"
+    assert "&quot;xss&quot;" in html, "quotes were not escaped"
 
 
 def test_money_in_the_bank_makes_an_upgrade_recommendable(client):

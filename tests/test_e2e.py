@@ -63,6 +63,13 @@ def test_every_gameweek_in_the_horizon_uses_the_same_frozen_inputs(client, tmp_p
 
     Checked by ratio rather than by equality, because the raw values differ
     legitimately across gameweeks through decay and fixture difficulty.
+
+    The ratio test alone is nearly a tautology: the target is always a
+    forward, forwards have no clean sheet term, and a proportional change in
+    expected goals therefore scales every gameweek by construction. So it is
+    paired with a positive control asserting that the change reaches EVERY
+    gameweek in the horizon, not just the total, which is the property that
+    would actually break if a later gameweek were recomputed from results.
     """
     from fplbot.projection import project_all
 
@@ -77,15 +84,24 @@ def test_every_gameweek_in_the_horizon_uses_the_same_frozen_inputs(client, tmp_p
               if p.id == target.id else p for p in players]
     after = project_all(players=bumped, **common)
 
-    ratios = [
-        a / b
-        for b, a in zip(base[target.id].per_gameweek, after[target.id].per_gameweek)
-        if b > 0
-    ]
+    weeks = list(zip(base[target.id].per_gameweek, after[target.id].per_gameweek))
+    ratios = [a / b for b, a in weeks if b > 0]
     assert len(ratios) >= 2, "need at least two scoring gameweeks to compare"
     assert max(ratios) - min(ratios) < 1e-9, (
         f"gameweeks responded differently to the same input change: {ratios}"
     )
+
+    # Positive control: the change must actually reach every gameweek in the
+    # horizon. Equal ratios across a horizon the change never touched would
+    # be trivially satisfied.
+    assert len(ratios) == settings.horizon, (
+        f"only {len(ratios)} of {settings.horizon} gameweeks score at all, so "
+        "the ratio test above is comparing fewer weeks than the horizon"
+    )
+    for gw, (before, after_gw) in enumerate(weeks):
+        assert after_gw > before, (
+            f"gameweek {gw} did not move when the input it reads changed"
+        )
 
 
 def test_an_entry_with_no_picks_yet_does_not_break_the_run(client, tmp_path):

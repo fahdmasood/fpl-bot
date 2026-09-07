@@ -23,7 +23,9 @@ def test_every_player_gets_a_projection(projections, client):
 
 def test_projections_are_non_negative_and_bounded(projections):
     for p in projections.values():
-        assert 0 <= p.total < 60, f"implausible projection: {p}"
+        # Observed maximum on the snapshot is under 14. A bound of 60
+        # could not have caught any projection the model has produced.
+        assert 0 <= p.total < 30, f"implausible projection: {p}"
 
 
 def test_horizon_produces_one_value_per_gameweek(projections):
@@ -234,15 +236,22 @@ def test_no_budget_defender_outranks_the_premium_attackers(client):
 
 
 def test_defenders_do_not_dominate_the_top_of_the_board(client):
-    """Coarse net beneath the sharper guards above."""
+    """Coarse net beneath the sharper guards above.
+
+    Read over the top 50, not the top 20: a squad holds 5 defenders out of
+    15, so a board that is a third defenders is already at the limit of what
+    a selection can use. The old window allowed 12 of 20 while observing 7,
+    and could not see that 24 of the top 50 were defenders, which is what the
+    missing goals conceded penalty was doing.
+    """
     settings = Settings(cache_dir="/tmp/x")
     proj = project_all(players=client.players(), teams=client.teams(),
                        fixtures=client.fixtures(),
                        next_gw_id=client.next_gameweek().id, settings=settings)
     by_id = {p.id: p for p in client.players()}
-    top20 = sorted(proj.values(), key=lambda x: x.total, reverse=True)[:20]
-    defenders = sum(1 for t in top20 if by_id[t.player_id].position == "DEF")
-    assert defenders <= 12, f"{defenders}/20 of the top projections are defenders"
+    top50 = sorted(proj.values(), key=lambda x: x.total, reverse=True)[:50]
+    defenders = sum(1 for t in top50 if by_id[t.player_id].position == "DEF")
+    assert defenders <= 20, f"{defenders}/50 of the top projections are defenders"
 
 
 def test_later_gameweeks_are_decayed(projections):
