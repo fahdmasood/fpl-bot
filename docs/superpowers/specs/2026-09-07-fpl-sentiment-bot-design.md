@@ -22,8 +22,8 @@ for it, and makes no transfers.
    move the user's real squad toward the optimum.
 4. It runs twice per gameweek without being asked, and the report lands
    somewhere the user will see it.
-5. A failure in any sentiment source degrades the run to stats-only rather
-   than failing it.
+5. A failure in any sentiment source degrades the run — to titles-only, or to
+   stats-only — rather than failing it, and the report says which.
 
 ## Non-goals
 
@@ -50,25 +50,55 @@ The deadline schedule comes from `events[].deadline_time`; nothing is
 hardcoded. At time of writing the next deadline is GW4,
 `2026-09-12T12:30:00Z`.
 
-### Sentiment sources — tiered, degrade gracefully
+### Sentiment sources
 
-**Tier 1 (default, no credentials).** Verified working:
+Comment-level volume is a requirement, not an upgrade. Post titles alone are a
+thin and lagging signal; the useful content — "he's been carrying a knock all
+week", "Pep hinted at rotation" — appears in comment threads, often hours
+before it reaches a headline.
 
-- `https://www.reddit.com/r/FantasyPL/hot.rss` and `/new.rss` — post titles and
-  summaries, roughly 25 items per feed.
-- BBC Sport football RSS and Guardian football RSS — injury reports and
-  press-conference coverage.
+**Reddit API (required).** A free Reddit OAuth "script" app, created once at
+`reddit.com/prefs/apps`, gives read access to r/FantasyPL listings *and* their
+comment trees under the client-credentials grant. No user account is exposed;
+the bot only reads public content. Credentials live in `REDDIT_CLIENT_ID` and
+`REDDIT_CLIENT_SECRET`.
 
-**Tier 2 (optional).** A free Reddit OAuth script app unlocks full listings and
-*comments*, which is where most FPL sentiment volume actually lives. If
-`REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` are present the collector uses the
-API; otherwise it uses Tier 1 and says so in the report.
+Comment volume is large, so the collector filters before anything reaches the
+language model:
+
+- Only threads that matter: the daily/matchday discussion threads, injury and
+  press-conference threads, and posts above a score threshold.
+- Only comments above a small score floor, discarding the long tail of
+  one-word replies.
+- Deduplicated by normalised text, since the same claim gets copy-pasted across
+  threads and would otherwise be double-counted as independent evidence.
+- Capped per run, newest first, so cost stays bounded on a busy matchday.
+
+**RSS (supporting).** BBC Sport football and Guardian football feeds, for
+injury reports and press-conference coverage from outside the community bubble.
+Both verified working unauthenticated.
+
+**Fallback.** If the Reddit credentials are missing or the API errors, the
+collector falls back to `https://www.reddit.com/r/FantasyPL/hot.rss` and
+`/new.rss` — verified working without auth, but titles only. A run in this
+state is explicitly labelled as reduced-coverage in the report, because the
+sentiment signal is meaningfully weaker without comments.
 
 Note: `reddit.com/r/.../hot.json` returns 403 to non-browser clients as of
 2026-09-07, and `old.reddit.com` 302-redirects. The `.rss` path is the working
 unauthenticated route. Do not reintroduce the `.json` path.
 
 X/Twitter is excluded: the API pricing does not justify the marginal signal.
+
+## Prerequisites
+
+One manual step before the first run: create a free Reddit script app at
+`reddit.com/prefs/apps` and put the client ID and secret in `.env`.
+
+Nothing else is required for the scheduled path, which scores sentiment inside
+the Claude session. An `ANTHROPIC_API_KEY` is only needed to run the CLI
+standalone. The FPL API needs no key, and no FPL credentials are held anywhere
+in this system.
 
 ## Architecture
 
@@ -88,8 +118,9 @@ reproducible and tests never hit the network. One retry with backoff; a stale
 cache is preferred over a failed run.
 
 ### `news.py`
-Collects raw text items from the tiered sources into a common shape:
-`{source, url, published_at, title, body}`. Knows nothing about players.
+Collects raw text items — posts and comments — into a common shape:
+`{source, url, published_at, title, body, score}`. Applies the thread, score,
+dedupe, and volume-cap filters described above. Knows nothing about players.
 
 ### `sentiment.py`
 Resolves player mentions and scores them. Two stages:
@@ -102,6 +133,20 @@ Resolves player mentions and scores them. Two stages:
 2. **Scoring** — resolved mentions batched to Claude Haiku 4.5, returning per
    mention `{player_id, sentiment: -1..1, category, confidence: 0..1}` where
    category is one of `injury`, `rotation`, `form`, `hype`.
+
+Scoring sits behind a `Scorer` interface with two implementations, so the
+package does not care who is running it:
+
+- `ApiScorer` — calls the Anthropic API directly using `ANTHROPIC_API_KEY`.
+  Used when the CLI runs standalone, and the path a future GitHub Actions
+  deployment would take.
+- `SessionScorer` — writes the batch to a file and reads scores back, letting
+  the scheduled Claude routine do the scoring inside its own session with no
+  API key involved. This is the default for the scheduled runs.
+
+A third `NullScorer` returns no scores, which is how the stats-only degraded
+run is implemented rather than as a special case threaded through the
+pipeline.
 
 An LLM earns its place here because football text is context-heavy: "Haaland
 has a knock" contains no negative word but is the most decision-relevant
@@ -164,6 +209,8 @@ a Discord or Slack webhook later is a change to the routine, not the package.
 ## Error handling
 
 - FPL API unreachable → use cache, mark the report stale with the cache age.
+- Reddit credentials missing or rejected → fall back to the RSS route and
+  label the run reduced-coverage.
 - A sentiment source fails → continue with the rest; the report names what was
   missing.
 - All sentiment fails → stats-only run, clearly labelled. Still a valid squad.
@@ -211,3 +258,5 @@ fpl-bot/
 - Default projection horizon: 1 gameweek, or 3-5 to favour fixture runs?
 - Alias table: seed by hand, or generate from the player list and correct as
   mismatches appear?
+- Per-run comment cap: what value keeps matchday cost sane without starving the
+  signal? Needs a measured run to set.
